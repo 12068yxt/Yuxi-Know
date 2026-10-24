@@ -16,6 +16,6 @@ def get_option_definitions() -> dict[str, Option]:
     }
 
 
-async def ensure_options_in_db(db: AsyncSession):
+async def ensure_options_in_db(db: AsyncSession) -> None:
     """保留管理员值，幂等更新代码拥有的定义。"""
-    return await sync_option_definitions(db, get_option_definitions())
+    await sync_option_definitions(db, get_option_definitions())

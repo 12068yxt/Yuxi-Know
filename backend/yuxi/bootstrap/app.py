@@ -1,8 +1,6 @@
 # ruff: noqa: E402  # 入口必须先加载环境。
 """部署时统一初始化 Schema 与代码拥有的共享持久内容。"""
 
-from __future__ import annotations
-
 import asyncio
 
 from yuxi.bootstrap.environment import load_environment
@@ -35,7 +33,6 @@ async def main() -> None:
             async with pg_manager.get_async_session_context() as session:
                 await ensure_options_in_db(session)
                 await ensure_builtin_model_providers_in_db(session)
-                await session.commit()
             logger.info("app-init: agent presets")
             async with pg_manager.get_async_session_context() as session:
                 await initialize_agent_presets(session)

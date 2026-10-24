@@ -6,7 +6,7 @@ from arq import cron
 from arq.worker import func
 
 from yuxi.bootstrap.capabilities import knowledge_enabled
-from yuxi.bootstrap.worker import _worker_shutdown, _worker_startup
+from yuxi.bootstrap.worker import shutdown, startup
 from yuxi.infrastructure.redis import get_arq_redis_settings
 from yuxi.infrastructure.runtime_settings import get_int_env
 from yuxi.infrastructure.worker_health import WORKER_HEALTH_INTERVAL_SECONDS, WORKER_HEALTH_KEY
@@ -45,6 +45,6 @@ class WorkerSettings:
     keep_result = 60
     health_check_interval = WORKER_HEALTH_INTERVAL_SECONDS
     health_check_key = WORKER_HEALTH_KEY
-    on_startup = _worker_startup
-    on_shutdown = _worker_shutdown
+    on_startup = startup
+    on_shutdown = shutdown
     redis_settings = get_arq_redis_settings()

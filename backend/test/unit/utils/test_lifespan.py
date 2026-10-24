@@ -51,7 +51,7 @@ async def test_invalid_security_secrets_fail_before_database_startup(
         api_bootstrap.RequiredStartupComponentError,
         match="component=security_secrets, type=ValueError",
     ):
-        await lifespan_module._startup(app)
+        await lifespan_module.startup(app)
 
     assert app.state.startup_components == {"security_secrets": {"status": "error", "required": True, "code": "ValueError"}}
 
@@ -71,7 +71,7 @@ async def test_api_startup_validates_full_schema_without_running_ddl(
     monkeypatch.setattr(api_bootstrap, "require_current_schema", require_current_schema)
 
     with pytest.raises(RuntimeError, match="stop after schema assertion"):
-        await lifespan_module._startup(FastAPI())
+        await lifespan_module.startup(FastAPI())
 
     assert calls == ["initialize", "require_current_schema"]
 
@@ -96,8 +96,8 @@ async def test_required_startup_component_failure_still_releases_every_runtime_c
         del operation
         released.append(name)
 
-    monkeypatch.setattr(lifespan_module, "_startup", fail_startup)
-    monkeypatch.setattr(lifespan_module, "_shutdown_component", record_shutdown)
+    monkeypatch.setattr(lifespan_module, "startup", fail_startup)
+    monkeypatch.setattr(lifespan_module, "shutdown_component", record_shutdown)
 
     app = FastAPI()
     with pytest.raises(
@@ -126,7 +126,7 @@ async def test_invalid_oidc_configuration_blocks_startup_before_database(monkeyp
     monkeypatch.setattr(api_bootstrap.pg_manager, "initialize", forbidden_initialize)
     app = FastAPI()
     with pytest.raises(api_bootstrap.RequiredStartupComponentError, match="component=oidc_config, type=ValueError"):
-        await api_bootstrap._startup(app)
+        await api_bootstrap.startup(app)
     assert app.state.startup_complete is False
     assert app.state.startup_components["oidc_config"] == {"status": "error", "required": True, "code": "ValueError"}
 
@@ -161,7 +161,7 @@ async def test_disabled_knowledge_does_not_initialize_existing_backends(monkeypa
     monkeypatch.setattr(api_bootstrap, "get_redis_client", redis)
     app = FastAPI()
 
-    await api_bootstrap._startup(app)
+    await api_bootstrap.startup(app)
 
     assert app.state.startup_complete is True
     assert app.state.startup_components["knowledge_base"] == {"status": "disabled", "required": False}

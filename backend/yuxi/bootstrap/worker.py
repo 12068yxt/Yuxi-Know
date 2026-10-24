@@ -1,7 +1,5 @@
 """Worker 进程装配与后台执行维护。"""
 
-from __future__ import annotations
-
 import asyncio
 import inspect
 
@@ -32,17 +30,16 @@ from yuxi.modules.schedules.service import claim_and_dispatch_due_jobs, recover_
 from yuxi.workers.background_jobs import reconcile_and_publish_jobs
 
 _RECONCILIATION_TASK_KEY = "agent_run_reconciliation_task"
+_JOB_RECONCILIATION_TASK_KEY = "background_job_reconciliation_task"
 _SANDBOX_CLEANUP_TASK_KEY = "sandbox_cleanup_task"
 
 
-_JOB_RECONCILIATION_TASK_KEY = "background_job_reconciliation_task"
-
-
-async def _worker_startup(ctx):
+async def startup(ctx: dict) -> None:
     """初始化 worker 依赖。"""
 
     if not isinstance(ctx, dict):
         raise TypeError("ARQ worker context 必须是字典")
+    ctx["worker_id"] = WORKER_ID
     knowledge = knowledge_enabled()
     if knowledge:
         require_knowledge_delegation_config()
@@ -50,7 +47,6 @@ async def _worker_startup(ctx):
     from yuxi.modules.agents.runtime.sandbox import check_sandbox_provider
 
     await check_sandbox_provider()
-    ctx["worker_id"] = WORKER_ID
     pg_manager.initialize()
     await require_current_schema(pg_manager)
     from yuxi.modules.system.options import system_options
@@ -68,12 +64,12 @@ async def _worker_startup(ctx):
     await _reconcile_agent_runs_once()
     await reconcile_and_publish_jobs()
     await _publish_job_reconciliation_health()
-    ctx[_SANDBOX_CLEANUP_TASK_KEY] = asyncio.create_task(_reconcile_sandboxes_forever())
     ctx[_RECONCILIATION_TASK_KEY] = asyncio.create_task(_reconcile_agent_run_leases_forever())
     ctx[_JOB_RECONCILIATION_TASK_KEY] = asyncio.create_task(_reconcile_background_jobs_forever())
+    ctx[_SANDBOX_CLEANUP_TASK_KEY] = asyncio.create_task(_reconcile_sandboxes_forever())
 
 
-async def _worker_shutdown(ctx):
+async def shutdown(ctx: dict) -> None:
     """关闭 worker 共享连接。"""
 
     if isinstance(ctx, dict):
@@ -135,14 +131,14 @@ async def _reconcile_agent_runs_once() -> None:
             logger.exception("Agent reconciliation health publication failed")
 
 
-async def _reconcile_sandboxes_forever() -> None:
-    """外部沙盒回收独立运行，慢释放不占据调度恢复循环。"""
-    while True:
-        try:
-            await maintain_user_sandboxes()
-        except Exception:
-            logger.exception("Sandbox cleanup reconciliation failed")
-        await asyncio.sleep(RUN_RECONCILIATION_SECONDS)
+async def _publish_reconciliation_health() -> None:
+    """续租 worker 的 AgentRun lease 收敛能力；持续失败后 readiness 自动失效。"""
+
+    await publish_worker_health(
+        WORKER_RECONCILIATION_HEALTH_KEY,
+        WORKER_ID,
+        WORKER_RECONCILIATION_HEALTH_TTL_SECONDS,
+    )
 
 
 async def _reconcile_background_jobs_forever() -> None:
@@ -169,11 +165,11 @@ async def _publish_job_reconciliation_health() -> None:
     )
 
 
-async def _publish_reconciliation_health() -> None:
-    """续租 worker 的 AgentRun lease 收敛能力；持续失败后 readiness 自动失效。"""
-
-    await publish_worker_health(
-        WORKER_RECONCILIATION_HEALTH_KEY,
-        WORKER_ID,
-        WORKER_RECONCILIATION_HEALTH_TTL_SECONDS,
-    )
+async def _reconcile_sandboxes_forever() -> None:
+    """外部沙盒回收独立运行，慢释放不占据调度恢复循环。"""
+    while True:
+        try:
+            await maintain_user_sandboxes()
+        except Exception:
+            logger.exception("Sandbox cleanup reconciliation failed")
+        await asyncio.sleep(RUN_RECONCILIATION_SECONDS)

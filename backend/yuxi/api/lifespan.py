@@ -2,7 +2,7 @@ from contextlib import AsyncExitStack, asynccontextmanager
 
 from fastapi import FastAPI
 
-from yuxi.bootstrap.api import _close_neo4j_connection, _shutdown_component, _startup
+from yuxi.bootstrap.api import close_neo4j_connection, shutdown_component, startup
 from yuxi.infrastructure.postgres.manager import pg_manager
 from yuxi.infrastructure.redis.queue import close_queue_clients
 
@@ -14,7 +14,7 @@ async def lifespan(app: FastAPI):
     app.state.startup_complete = False
     app.state.startup_components = {}
     try:
-        await _startup(app)
+        await startup(app)
         async with AsyncExitStack() as stack:
             knowledge_mcp = getattr(app.state, "knowledge_mcp", None)
             if knowledge_mcp is not None:
@@ -22,6 +22,6 @@ async def lifespan(app: FastAPI):
             yield
     finally:
         app.state.startup_complete = False
-        await _shutdown_component("queue_clients", close_queue_clients)
-        await _shutdown_component("neo4j", _close_neo4j_connection)
-        await _shutdown_component("postgres", pg_manager.close)
+        await shutdown_component("queue_clients", close_queue_clients)
+        await shutdown_component("neo4j", close_neo4j_connection)
+        await shutdown_component("postgres", pg_manager.close)

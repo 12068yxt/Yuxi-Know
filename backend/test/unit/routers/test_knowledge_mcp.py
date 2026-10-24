@@ -221,8 +221,8 @@ async def test_api_lifespan_starts_mcp_and_cleans_up_after_failure(monkeypatch):
         raise RuntimeError("MCP startup failed")
         yield
 
-    monkeypatch.setattr(lifecycle, "_startup", AsyncMock())
-    monkeypatch.setattr(lifecycle, "_shutdown_component", release)
+    monkeypatch.setattr(lifecycle, "startup", AsyncMock())
+    monkeypatch.setattr(lifecycle, "shutdown_component", release)
     app = FastAPI()
     app.state.knowledge_mcp = SimpleNamespace(manager=SimpleNamespace(run=failed_manager))
     with pytest.raises(RuntimeError, match="MCP startup failed"):

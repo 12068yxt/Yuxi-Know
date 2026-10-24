@@ -44,14 +44,14 @@ async def test_enabled_process_rejects_missing_shared_config_before_random_secre
     if process == "api":
         app = FastAPI()
         with pytest.raises(api.RequiredStartupComponentError, match="component=knowledge_delegation_config"):
-            await api._startup(app)
+            await api.startup(app)
         assert app.state.startup_complete is False
         assert app.state.startup_components == {
             "knowledge_delegation_config": {"status": "error", "required": True, "code": "ValueError"},
         }
     else:
         with pytest.raises(ValueError, match=missing):
-            await worker._worker_startup({})
+            await worker.startup({})
     assert os.environ.get("JWT_SECRET_KEY") == expected_jwt
     assert missing not in os.environ
 
@@ -75,9 +75,9 @@ async def test_valid_enabled_config_and_disabled_without_instance_reach_schema(m
     app = FastAPI()
     with pytest.raises(ReachedSchema):
         if process == "api":
-            await api._startup(app)
+            await api.startup(app)
         else:
-            await worker._worker_startup({})
+            await worker.startup({})
     assert initialized == ["database"]
     if process == "api":
         assert ("knowledge_delegation_config" in app.state.startup_components) is enabled
@@ -111,7 +111,7 @@ async def test_worker_backend_unready_cannot_publish_or_claim_pending_jobs(monke
     monkeypatch.setattr(worker, "reconcile_and_publish_jobs", publish)
     ctx = {}
     with pytest.raises(ConnectionError, match=failure + " not ready"):
-        await worker._worker_startup(ctx)
+        await worker.startup(ctx)
     recover.assert_not_awaited()
     publish.assert_not_awaited()
     assert calls == (["milvus"] if failure == "milvus" else ["milvus", "neo4j"])
@@ -161,6 +161,6 @@ async def test_worker_publishes_only_after_enabled_backends_are_ready(monkeypatc
     ):
         monkeypatch.setattr(worker, name, AsyncMock())
     ctx = {}
-    await worker._worker_startup(ctx)
+    await worker.startup(ctx)
     await asyncio.gather(*(value for value in ctx.values() if isinstance(value, asyncio.Task)))
     assert calls == (["milvus", "neo4j", "publish"] if enabled else ["publish"])

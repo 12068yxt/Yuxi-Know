@@ -88,7 +88,7 @@ async def test_worker_startup_prepares_runtime_and_recovers_jobs(monkeypatch: py
     monkeypatch.setattr(worker_bootstrap, "claim_and_dispatch_due_jobs", fake_claim_and_dispatch_due_jobs)
 
     ctx = {}
-    await worker_bootstrap._worker_startup(ctx)
+    await worker_bootstrap.startup(ctx)
     await ctx[worker_bootstrap._RECONCILIATION_TASK_KEY]
     await ctx[worker_bootstrap._JOB_RECONCILIATION_TASK_KEY]
 
@@ -126,7 +126,7 @@ async def test_worker_shutdown_closes_queue_clients_before_postgres(monkeypatch:
     monkeypatch.setattr("yuxi.infrastructure.neo4j.close_shared_neo4j_connection", lambda: calls.append("neo4j"))
     monkeypatch.setattr(worker_bootstrap.pg_manager, "close", fake_close_postgres)
 
-    await worker_bootstrap._worker_shutdown({worker_bootstrap._RECONCILIATION_TASK_KEY: reconciliation_job})
+    await worker_bootstrap.shutdown({worker_bootstrap._RECONCILIATION_TASK_KEY: reconciliation_job})
 
     assert calls == ["redis", "neo4j", "postgres"]
     assert reconciliation_job.cancelled()
@@ -147,7 +147,7 @@ async def test_worker_shutdown_closes_postgres_when_queue_close_fails(monkeypatc
         """仅用于构造真实 ARQ worker。"""
 
     consumer_pool = AsyncMock()
-    worker = Worker(functions=[unused_job], redis_pool=consumer_pool, on_shutdown=worker_bootstrap._worker_shutdown, handle_signals=False)
+    worker = Worker(functions=[unused_job], redis_pool=consumer_pool, on_shutdown=worker_bootstrap.shutdown, handle_signals=False)
     await worker.close()
     postgres.assert_awaited_once()
     consumer_pool.close.assert_awaited_once_with(close_connection_pool=True)
@@ -222,7 +222,7 @@ async def test_worker_rejects_invalid_actual_process_secret(monkeypatch, secret)
     """单独启动 worker 也必须拒绝实际收到的无效密钥。"""
     monkeypatch.setenv(secret, "short")
     with pytest.raises(ValueError, match="至少 32"):
-        await worker_bootstrap._worker_startup({})
+        await worker_bootstrap.startup({})
 
 
 async def test_worker_rejects_incompatible_schema_before_runtime_recovery(monkeypatch):
@@ -230,7 +230,7 @@ async def test_worker_rejects_incompatible_schema_before_runtime_recovery(monkey
     monkeypatch.setattr(worker_bootstrap.pg_manager, "initialize", lambda: None)
     monkeypatch.setattr(worker_bootstrap, "require_current_schema", AsyncMock(side_effect=RuntimeError("schema mismatch")))
     with pytest.raises(RuntimeError, match="schema mismatch"):
-        await worker_bootstrap._worker_startup({})
+        await worker_bootstrap.startup({})
 
 
 async def test_reconciliation_continues_later_phases_without_publishing_success(monkeypatch):
