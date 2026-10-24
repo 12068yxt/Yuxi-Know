@@ -7,6 +7,7 @@ MinerU Official 解析器
 import os
 import tempfile
 import time
+from contextlib import suppress
 from pathlib import Path
 from typing import Any
 
@@ -95,26 +96,24 @@ class MinerUOfficialParser(DocumentEngine):
             zip_url = result.get("full_zip_url")
             zip_path = self._download_zip(zip_url)
             try:
-                processed = extract_markdown_archive(zip_path, output_dir)
-                text = processed
+                text = extract_markdown_archive(zip_path, output_dir)
             finally:
-                try:
+                # 临时文件清理失败不能覆盖已经获得的解析结果或原始异常。
+                with suppress(OSError):
                     os.unlink(zip_path)
-                except Exception:
-                    pass
 
             processing_time = time.time() - start_time
             logger.info(f"MinerU Official 处理成功: {os.path.basename(file_path)} - {len(text)} 字符 ({processing_time:.2f}s)")
 
             return text
 
+        except DocumentParserException:
+            raise
         except Exception as e:
-            if isinstance(e, DocumentParserException):
-                raise
             processing_time = time.time() - start_time
             error_msg = f"MinerU Official 处理失败: {str(e)}"
             logger.error(f"{error_msg} ({processing_time:.2f}s)")
-            raise DocumentParserException(error_msg, self.get_service_name(), "processing_failed")
+            raise DocumentParserException(error_msg, self.get_service_name(), "processing_failed") from e
 
     def _upload_file(self, file_path: str, params: dict[str, Any]) -> str:
         """上传文件并返回 batch_id"""
@@ -213,7 +212,7 @@ class MinerUOfficialParser(DocumentEngine):
 
             if state == "done":
                 return file_result
-            elif state == "failed":
+            if state == "failed":
                 err_msg = file_result.get("err_msg", "未知错误")
                 raise DocumentParserException(f"文档解析失败: {err_msg}", self.get_service_name(), "parsing_failed")
 

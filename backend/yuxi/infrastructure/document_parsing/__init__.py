@@ -43,30 +43,26 @@ SUPPORTED_FILE_EXTENSIONS = (
 
 
 class DocumentProcessorException(Exception):
-    """文档处理异常基类"""
+    """文档处理异常基类。"""
 
-    def __init__(self, message: str, service_name: str = None, status_code: str = None):
+    def __init__(self, message: str, service_name: str | None = None, status_code: str | None = None):
         super().__init__(message)
         self.message = message
         self.service_name = service_name
         self.status_code = status_code
 
-    def __str__(self):
+    def __str__(self) -> str:
         if self.service_name:
             return f"[{self.service_name}] {self.message}"
         return self.message
 
 
 class OCRException(DocumentProcessorException):
-    """OCR处理异常"""
-
-    pass
+    """OCR 处理异常。"""
 
 
 class DocumentParserException(DocumentProcessorException):
-    """文档解析异常"""
-
-    pass
+    """文档解析异常。"""
 
 
 def is_supported_file_extension(file_name: str | Path) -> bool:

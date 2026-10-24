@@ -10,11 +10,13 @@ from yuxi.infrastructure.observability.logging import logger
 SUPPORTED_FORMATS = {"JPEG", "PNG", "WebP", "GIF", "BMP"}
 MAX_FILE_SIZE = 5 * 1024 * 1024
 
+_DEFAULT_IMAGE_QUALITY = 85
+
 
 def process_uploaded_image(image_data: bytes, filename: str = "") -> dict:
     """处理上传图片，返回图片内容、缩略图与元数据或错误信息。"""
     try:
-        img_format, _ = _validate_image_format(image_data)
+        img_format = _validate_image_format(image_data)
         if img_format not in SUPPORTED_FORMATS:
             raise ValueError(f"不支持的图片格式: {img_format}")
 
@@ -45,32 +47,27 @@ def process_uploaded_image(image_data: bytes, filename: str = "") -> dict:
         return {"success": False, "error": str(e)}
 
 
-def _validate_image_format(image_data: bytes) -> tuple[str, str]:
-    """验证图片格式并返回格式信息。"""
+def _validate_image_format(image_data: bytes) -> str | None:
+    """识别图片格式名，无法读取时统一为业务错误。"""
     try:
         with Image.open(io.BytesIO(image_data)) as img:
-            return img.format, img.mode
-    except Exception as e:
-        raise ValueError(f"无效的图片格式: {str(e)}")
+            return img.format
+    except Exception as exc:
+        raise ValueError(f"无效的图片格式: {exc}") from exc
 
 
 def _fix_image_orientation(img: Image.Image) -> Image.Image:
-    """根据 EXIF 信息修正图片方向。"""
+    """根据 EXIF Orientation 修正图片方向。"""
     try:
-        if hasattr(img, "_getexif"):
-            exif = img._getexif()
-            if exif is not None:
-                for tag, value in exif.items():
-                    if tag in ExifTags.TAGS and ExifTags.TAGS[tag] == "Orientation":
-                        if value == 3:
-                            img = img.rotate(180, expand=True)
-                        elif value == 6:
-                            img = img.rotate(270, expand=True)
-                        elif value == 8:
-                            img = img.rotate(90, expand=True)
-                        break
-    except Exception as e:
-        logger.warning(f"修正图片方向失败，使用原始方向: {str(e)}")
+        orientation = img.getexif().get(ExifTags.Base.Orientation)
+        if orientation == 3:
+            img = img.rotate(180, expand=True)
+        elif orientation == 6:
+            img = img.rotate(270, expand=True)
+        elif orientation == 8:
+            img = img.rotate(90, expand=True)
+    except Exception as exc:
+        logger.warning(f"修正图片方向失败，使用原始方向: {exc}")
 
     return img
 
@@ -80,54 +77,40 @@ def _generate_thumbnail(img: Image.Image) -> bytes:
     try:
         thumbnail = _convert_to_rgb_for_export(img)
         thumbnail.thumbnail((200, 200), Image.Resampling.LANCZOS)
-
-        with io.BytesIO() as output:
-            thumbnail.save(output, format="JPEG", quality=85, optimize=True)
-            return output.getvalue()
-
-    except Exception as e:
-        logger.error(f"生成缩略图失败: {str(e)}")
-        with io.BytesIO() as output:
-            empty_img = Image.new("RGB", (1, 1), color="white")
-            empty_img.save(output, format="JPEG", quality=85)
-            return output.getvalue()
+        return _encode_image(thumbnail, "JPEG")
+    except Exception as exc:
+        logger.error(f"生成缩略图失败: {exc}")
+        return _encode_image(Image.new("RGB", (1, 1), color="white"), "JPEG")
 
 
 def _compress_image(img: Image.Image, original_format: str) -> tuple[bytes, str]:
     """压缩图片，超出大小限制时降低质量或缩小尺寸。"""
     processed_img = _convert_to_rgb_for_export(img)
-    target_format = "JPEG" if original_format != "PNG" else "PNG"
-    quality = 85
+    target_format = "PNG" if original_format == "PNG" else "JPEG"
 
+    compressed_data = _encode_image(processed_img, target_format)
+    quality = _DEFAULT_IMAGE_QUALITY
+    while len(compressed_data) > MAX_FILE_SIZE and quality > 10:
+        quality -= 10
+        compressed_data = _encode_image(processed_img, target_format, quality=quality)
+
+    scale_factor = 0.9
+    while len(compressed_data) > MAX_FILE_SIZE and scale_factor > 0.3:
+        resized_img = processed_img.resize(
+            (int(processed_img.width * scale_factor), int(processed_img.height * scale_factor)),
+            Image.Resampling.LANCZOS,
+        )
+        compressed_data = _encode_image(resized_img, target_format)
+        scale_factor -= 0.1
+
+    return compressed_data, target_format
+
+
+def _encode_image(img: Image.Image, image_format: str, *, quality: int = _DEFAULT_IMAGE_QUALITY) -> bytes:
+    """按指定格式编码图片，统一压缩与优化参数。"""
     with io.BytesIO() as output:
-        processed_img.save(output, format=target_format, quality=quality, optimize=True)
-        compressed_data = output.getvalue()
-
-        if len(compressed_data) <= MAX_FILE_SIZE:
-            return compressed_data, target_format
-
-        while len(compressed_data) > MAX_FILE_SIZE and quality > 10:
-            quality -= 10
-            output.seek(0)
-            output.truncate(0)
-            processed_img.save(output, format=target_format, quality=quality, optimize=True)
-            compressed_data = output.getvalue()
-
-        if len(compressed_data) > MAX_FILE_SIZE:
-            scale_factor = 0.9
-            while len(compressed_data) > MAX_FILE_SIZE and scale_factor > 0.3:
-                new_width = int(processed_img.width * scale_factor)
-                new_height = int(processed_img.height * scale_factor)
-                resized_img = processed_img.resize((new_width, new_height), Image.Resampling.LANCZOS)
-
-                output.seek(0)
-                output.truncate(0)
-                resized_img.save(output, format=target_format, quality=85, optimize=True)
-                compressed_data = output.getvalue()
-
-                scale_factor -= 0.1
-
-        return compressed_data, target_format
+        img.save(output, format=image_format, quality=quality, optimize=True)
+        return output.getvalue()
 
 
 def _convert_to_rgb_for_export(img: Image.Image) -> Image.Image:

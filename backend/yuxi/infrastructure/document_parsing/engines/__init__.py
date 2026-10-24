@@ -9,44 +9,24 @@ from typing import Any, ClassVar
 
 
 class DocumentEngine(ABC):
-    """文档处理器基类"""
+    """OCR 引擎统一契约：生成相对引用的 Markdown 并写入调用方目录。"""
 
     engine_id: ClassVar[str] = ""
 
     @abstractmethod
     def process_file(self, file_path: str, output_dir: Path, params: dict[str, Any] | None = None) -> str:
         """生成相对引用的 Markdown，并将图片写入调用方的输出目录。"""
-        pass
 
     @abstractmethod
     def check_health(self) -> dict[str, Any]:
-        """
-        检查服务健康状态
-
-        Returns:
-            dict: 健康状态信息
-                {
-                    "status": "healthy" | "unhealthy" | "unavailable" | "error",
-                    "message": "状态描述",
-                    "details": {...}  # 可选的详细信息
-                }
-        """
-        pass
+        """报告引擎可用性，返回 status、message 与可选 details。"""
 
     def get_service_name(self) -> str:
         """返回 parser 声明的稳定服务标识。"""
         return get_engine_spec(self.engine_id).service_name
 
     def supports_file_type(self, file_extension: str) -> bool:
-        """
-        检查是否支持指定的文件类型
-
-        Args:
-            file_extension: 文件扩展名 (包含点, 如 '.pdf')
-
-        Returns:
-            bool: 是否支持
-        """
+        """判断扩展名（可带点）是否由当前引擎声明支持。"""
         return file_extension.lower() in self.get_supported_extensions()
 
     def get_supported_extensions(self) -> list[str]:
@@ -147,10 +127,10 @@ def get_ocr_engines_for_extension(extension: str) -> tuple[str, ...]:
 _ENGINE_CACHE: dict[str, tuple[str, DocumentEngine]] = {}
 
 
-def get_engine(engine_id: str, **kwargs) -> DocumentEngine:
+def get_engine(engine_id: str, **kwargs: Any) -> DocumentEngine:
     """按有效配置惰性加载引擎，配置变化时替换该引擎实例。"""
     spec = get_engine_spec(engine_id)
-    fingerprint = hashlib.sha256(repr(sorted(kwargs.items())).encode()).hexdigest()
+    fingerprint = _configuration_fingerprint(kwargs)
     cached = _ENGINE_CACHE.get(engine_id)
     if cached is not None and cached[0] == fingerprint:
         return cached[1]
@@ -158,3 +138,8 @@ def get_engine(engine_id: str, **kwargs) -> DocumentEngine:
     engine = engine_type(**kwargs)
     _ENGINE_CACHE[engine_id] = (fingerprint, engine)
     return engine
+
+
+def _configuration_fingerprint(kwargs: dict[str, Any]) -> str:
+    """用稳定排序后的配置生成缓存键。"""
+    return hashlib.sha256(repr(sorted(kwargs.items())).encode()).hexdigest()

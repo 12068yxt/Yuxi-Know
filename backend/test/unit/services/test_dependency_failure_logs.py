@@ -29,7 +29,7 @@ async def test_dependency_failure_fields_reach_shipping_file_log(monkeypatch, tm
         with monkeypatch.context() as logging_patch:
             logging_patch.setattr(logging_module, "LOG_DIR", tmp_path)
             logging_patch.setattr(logging_module, "LOG_FILE", str(log_file))
-            logging_module.setup_logger("audit-test", console=False)
+            logging_module.setup_logger(console=False)
 
             if component == "web_search":
                 monkeypatch.setattr(
@@ -63,4 +63,4 @@ async def test_dependency_failure_fields_reach_shipping_file_log(monkeypatch, tm
             assert all(field in output for field in expected_fields)
             assert "fixture-credential-must-not-appear" not in output
     finally:
-        logging_module.setup_logger("Yuxi")
+        logging_module.setup_logger()

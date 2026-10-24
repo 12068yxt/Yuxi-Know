@@ -1,14 +1,15 @@
 """进程级 ARQ 连接生命周期，业务域各自拥有投递语义。"""
 
 import asyncio
+from typing import Any
 
 from yuxi.infrastructure.redis import close_async_redis_client, create_arq_redis_pool
 
-_arq_pool = None
+_arq_pool: Any | None = None
 _arq_lock = asyncio.Lock()
 
 
-async def get_arq_pool():
+async def get_arq_pool() -> Any:
     """串行初始化当前进程的 ARQ 连接池。"""
     global _arq_pool
     if _arq_pool is not None:

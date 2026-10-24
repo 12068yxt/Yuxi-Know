@@ -40,7 +40,7 @@ IDENTITY_PERMISSION_STATEMENTS = (
 @asynccontextmanager
 async def schema_migration_lock(manager):
     """用独立 PostgreSQL session 串行化 Schema 初始化进程。"""
-    manager._check_initialized()
+    manager.require_initialized()
     async with manager.async_engine.connect() as conn:
         params = {"lock_scope": "yuxi:schema-migration"}
         await conn.execute(text("SELECT pg_advisory_lock(hashtextextended(:lock_scope, 0))"), params)
@@ -60,7 +60,7 @@ async def schema_migration_lock(manager):
 
 async def create_schema_version_table(manager) -> None:
     """创建轻量 Schema 版本表；仅允许 Schema 初始化进程调用。"""
-    manager._check_initialized()
+    manager.require_initialized()
     async with manager.async_engine.begin() as conn:
         await conn.execute(
             text(
@@ -77,7 +77,7 @@ async def create_schema_version_table(manager) -> None:
 
 async def record_schema_version(manager, domain: str, version: int) -> None:
     """在当前 fresh baseline 完整成功后记录域版本。"""
-    manager._check_initialized()
+    manager.require_initialized()
     async with manager.async_engine.begin() as conn:
         await conn.execute(
             text(
@@ -97,7 +97,7 @@ async def create_knowledge_tables(manager):
     from yuxi.infrastructure.postgres.models import load_models
 
     load_models()
-    manager._check_initialized()
+    manager.require_initialized()
     async with manager.async_engine.begin() as conn:
         await conn.run_sync(KnowledgeBase.metadata.create_all)
     logger.info("PostgreSQL knowledge tables created")
@@ -108,7 +108,7 @@ async def create_business_tables(manager):
     from yuxi.infrastructure.postgres.models import load_models
 
     load_models()
-    manager._check_initialized()
+    manager.require_initialized()
     async with manager.async_engine.begin() as conn:
         await conn.run_sync(BusinessBase.metadata.create_all)
     logger.info("PostgreSQL business tables created")
@@ -116,7 +116,7 @@ async def create_business_tables(manager):
 
 async def ensure_knowledge_schema(manager):
     """建立不适合由 ORM 表达的知识域访问路径索引。"""
-    manager._check_initialized()
+    manager.require_initialized()
     statements = (
         "CREATE INDEX IF NOT EXISTS ix_knowledge_chunks_graph_extraction_status "
         "ON knowledge_chunks(kb_id, ((graph_extraction_details->>'status')))",
@@ -133,7 +133,7 @@ async def ensure_knowledge_schema(manager):
 
 async def ensure_business_schema(manager):
     """建立不适合由 ORM 表达的业务热路径索引。"""
-    manager._check_initialized()
+    manager.require_initialized()
     statements = (
         "CREATE SEQUENCE IF NOT EXISTS agent_runs_execution_seq",
         "ALTER TABLE agent_runs ALTER COLUMN execution_seq SET DEFAULT nextval('agent_runs_execution_seq')",
@@ -158,7 +158,7 @@ async def drop_fresh_schema(manager) -> None:
     from yuxi.infrastructure.postgres.models import load_models
 
     load_models()
-    manager._check_initialized()
+    manager.require_initialized()
     async with manager.async_engine.begin() as conn:
         # PostgreSQL 在删除循环 FK 时要求明确 CASCADE；仅删除已确认属于本次 fresh 初始化的表。
         preparer = conn.dialect.identifier_preparer

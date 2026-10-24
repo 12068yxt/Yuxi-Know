@@ -2,42 +2,46 @@
 
 import json
 import os
+from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from typing import TYPE_CHECKING
 
 from psycopg_pool import AsyncConnectionPool
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker, create_async_engine
 
 from yuxi.infrastructure.observability.logging import logger
 from yuxi.infrastructure.postgres.connection import postgres_conninfo
 from yuxi.infrastructure.runtime_settings import get_int_env
 from yuxi.shared.singleton import SingletonMeta
 
+if TYPE_CHECKING:
+    from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
+
 
 class PostgresManager(metaclass=SingletonMeta):
-    """PostgreSQL 数据库管理器 - 支持知识库和业务数据"""
+    """PostgreSQL engine、业务 session 与 LangGraph checkpoint 连接池。"""
 
-    KB_DATABASE_URL_ENV = "POSTGRES_URL"
+    DATABASE_URL_ENV = "POSTGRES_URL"
 
     def __init__(self):
-        self.async_engine = None
-        self.AsyncSession = None
-        self.langgraph_pool = None
-        self.langgraph_checkpointer = None
-        self._langgraph_checkpointer_setup = False
+        self.async_engine: AsyncEngine | None = None
+        self.AsyncSession: async_sessionmaker[AsyncSession] | None = None
+        self.langgraph_pool: AsyncConnectionPool | None = None
+        self.langgraph_checkpointer: AsyncPostgresSaver | None = None
+        self.langgraph_checkpointer_setup = False
         self._initialized = False
 
-    def initialize(self):
-        """初始化数据库连接"""
+    def initialize(self) -> None:
+        """初始化数据库连接；配置缺失或创建失败时保持未初始化状态。"""
         if self._initialized:
             return
 
-        db_url = os.getenv(self.KB_DATABASE_URL_ENV)
+        db_url = os.getenv(self.DATABASE_URL_ENV)
         if not db_url:
-            logger.error(f"环境变量 {self.KB_DATABASE_URL_ENV} 未设置，请在 docker-compose.yml 或 .env 中配置 PostgreSQL 连接字符串")
+            logger.error(f"环境变量 {self.DATABASE_URL_ENV} 未设置，请在 docker-compose.yml 或 .env 中配置 PostgreSQL 连接字符串")
             return
 
         try:
-            # 创建异步 SQLAlchemy 引擎
             self.async_engine = create_async_engine(
                 db_url,
                 json_serializer=lambda obj: json.dumps(obj, ensure_ascii=False),
@@ -49,24 +53,15 @@ class PostgresManager(metaclass=SingletonMeta):
                 pool_timeout=get_int_env("POSTGRES_POOL_TIMEOUT_SECONDS", 30),
             )
 
-            # 创建异步会话工厂
             self.AsyncSession = async_sessionmaker(
                 bind=self.async_engine,
                 class_=AsyncSession,
                 expire_on_commit=False,
             )
 
-            # ==========================================
-            # 2. 为 LangGraph 专门初始化一个原生 psycopg_pool
-            # ==========================================
-            # ⚠️ 注意：psycopg 不认识 "+asyncpg" 这样的 SQLAlchemy 方言标识。
-            # 如果你的 db_url 是 "postgresql+asyncpg://user:pwd@host/db"，
-            # 需要把它清洗成标准的 "postgresql://user:pwd@host/db"
-            langgraph_db_url = postgres_conninfo(db_url)
-
-            # 创建 LangGraph 专属连接池
+            # LangGraph 使用原生 psycopg pool，连接串不能带 SQLAlchemy 方言前缀。
             self.langgraph_pool = AsyncConnectionPool(
-                conninfo=langgraph_db_url,
+                conninfo=postgres_conninfo(db_url),
                 max_size=get_int_env("LANGGRAPH_POSTGRES_POOL_SIZE", 10),
                 timeout=get_int_env("LANGGRAPH_POSTGRES_POOL_TIMEOUT_SECONDS", 30),
                 kwargs={"autocommit": True},  # LangGraph Checkpoint 强依赖 autocommit
@@ -79,17 +74,18 @@ class PostgresManager(metaclass=SingletonMeta):
             logger.error(f"Failed to initialize PostgreSQL manager: {e}")
 
     @asynccontextmanager
-    async def schema_migration_lock(self):
+    async def schema_migration_lock(self) -> AsyncIterator[None]:
         """为测试与迁移调用方提供统一的 Schema advisory lock。"""
+        # migrations 依赖本模块，运行时导入以打破启动期循环。
         from yuxi.migrations.schema import schema_migration_lock
 
         async with schema_migration_lock(self):
             yield
 
     @asynccontextmanager
-    async def get_async_session_context(self):
-        """获取异步数据库会话的上下文管理器"""
-        self.initialize()  # 确保已初始化
+    async def get_async_session_context(self) -> AsyncIterator[AsyncSession]:
+        """获取自动提交/回滚并关闭的业务数据库会话。"""
+        self.initialize()
         session = self.AsyncSession()
         try:
             yield session
@@ -102,8 +98,8 @@ class PostgresManager(metaclass=SingletonMeta):
         finally:
             await session.close()
 
-    async def close(self):
-        """关闭引擎"""
+    async def close(self) -> None:
+        """关闭 engine 与 LangGraph 连接池并重置初始化状态。"""
         if self.async_engine:
             await self.async_engine.dispose()
 
@@ -114,11 +110,11 @@ class PostgresManager(metaclass=SingletonMeta):
         self.AsyncSession = None
         self.langgraph_pool = None
         self.langgraph_checkpointer = None
-        self._langgraph_checkpointer_setup = False
+        self.langgraph_checkpointer_setup = False
         self._initialized = False
 
-    def _check_initialized(self):
-        """检查是否已初始化"""
+    def require_initialized(self) -> None:
+        """要求连接已初始化，供 schema 与 checkpointer 边界显式失败。"""
         if not self._initialized:
             raise RuntimeError("PostgreSQL manager not initialized. Please check configuration.")
 

@@ -1,27 +1,34 @@
 """LangGraph PostgreSQL checkpoint pool 的 saver 与建表生命周期。"""
 
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
+
 from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 
 from yuxi.infrastructure.observability.logging import logger
+
+if TYPE_CHECKING:
+    from yuxi.infrastructure.postgres.manager import PostgresManager
 
 # Session 锁值与已部署进程保持兼容；必须在同一物理连接释放。
 CHECKPOINTER_SETUP_LOCK_KEY = 94721802
 
 
-def get_langgraph_checkpointer(manager) -> AsyncPostgresSaver:
+def get_langgraph_checkpointer(manager: PostgresManager) -> AsyncPostgresSaver:
     """为本次构图创建独立 saver，共享有界连接池而不共享其实例锁。"""
-    manager._check_initialized()
+    manager.require_initialized()
     if manager.langgraph_pool is None:
         raise RuntimeError("PostgreSQL LangGraph connection pool is not initialized.")
     return AsyncPostgresSaver(manager.langgraph_pool)
 
 
-async def setup_langgraph_checkpointer(manager) -> AsyncPostgresSaver:
+async def setup_langgraph_checkpointer(manager: PostgresManager) -> AsyncPostgresSaver:
     """跨进程串行创建 checkpoint 表，迁移实例不参与运行时构图。"""
     if manager.langgraph_checkpointer is None:
         manager.langgraph_checkpointer = get_langgraph_checkpointer(manager)
     checkpointer = manager.langgraph_checkpointer
-    if not manager._langgraph_checkpointer_setup:
+    if not manager.langgraph_checkpointer_setup:
         async with manager.langgraph_pool.connection() as connection:
             await connection.execute(f"SELECT pg_advisory_lock({CHECKPOINTER_SETUP_LOCK_KEY})")
             try:
@@ -36,6 +43,6 @@ async def setup_langgraph_checkpointer(manager) -> AsyncPostgresSaver:
                     # Session 级锁不随事务回滚释放，解锁失败时必须销毁物理连接。
                     await connection.close()
                     raise
-            manager._langgraph_checkpointer_setup = True
+            manager.langgraph_checkpointer_setup = True
             logger.info("LangGraph checkpoint tables verified/created")
     return checkpointer

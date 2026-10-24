@@ -1,8 +1,4 @@
-"""
-DeepSeek OCR Parser
-
-Uses DeepSeek-OCR via SiliconFlow API for document parsing and OCR.
-"""
+"""DeepSeek OCR（SiliconFlow API）解析器。"""
 
 import base64
 import io
@@ -22,11 +18,10 @@ from yuxi.infrastructure.observability.logging import logger
 
 
 class DeepSeekOCRParser(DocumentEngine):
-    """DeepSeek OCR Parser using SiliconFlow API"""
+    """通过 SiliconFlow 的 DeepSeek-OCR 模型解析文档。"""
 
     engine_id = "deepseek_ocr"
 
-    # MIME type mapping for supported formats
     MIME_TYPE_MAP = {
         ".pdf": "application/pdf",
         ".png": "image/png",
@@ -52,9 +47,8 @@ class DeepSeekOCRParser(DocumentEngine):
         }
 
     def check_health(self) -> dict[str, Any]:
-        """Check API availability and key validity"""
+        """检查 SiliconFlow 模型列表接口是否可用。"""
         try:
-            # We can't easily "ping" without cost, but we can check if the model list is accessible
             models_url = self.api_url.rsplit("/chat/completions", 1)[0] + "/models"
             response = requests.get(models_url, headers=self.headers, timeout=10)
 
@@ -64,21 +58,18 @@ class DeepSeekOCRParser(DocumentEngine):
                     "message": "DeepSeek OCR (SiliconFlow) is available",
                     "details": {"api_url": self.api_url},
                 }
-            elif response.status_code == 401:
+            if response.status_code == 401:
                 return {"status": "unhealthy", "message": "Invalid API Key", "details": {"error_code": "401"}}
-            else:
-                return {
-                    "status": "unhealthy",
-                    "message": f"API Error: {response.status_code}",
-                    "details": {"status_code": response.status_code},
-                }
+            return {
+                "status": "unhealthy",
+                "message": f"API Error: {response.status_code}",
+                "details": {"status_code": response.status_code},
+            }
         except Exception as e:
             return {"status": "unavailable", "message": f"Connection failed: {str(e)}", "details": {"error": str(e)}}
 
     def process_file(self, file_path: str, output_dir: Path, params: dict[str, Any] | None = None) -> str:
-        """
-        Process file using DeepSeek OCR via SiliconFlow
-        """
+        """逐页调用 DeepSeek OCR，返回拼接后的 Markdown。"""
         if not os.path.exists(file_path):
             raise DocumentParserException(f"File not found: {file_path}", self.get_service_name(), "file_not_found")
 
@@ -101,19 +92,19 @@ class DeepSeekOCRParser(DocumentEngine):
 
             return content
 
+        except DocumentParserException:
+            raise
         except Exception as e:
-            if isinstance(e, DocumentParserException):
-                raise
             error_msg = f"DeepSeek OCR failed: {str(e)}"
             logger.error(error_msg)
-            raise DocumentParserException(error_msg, self.get_service_name(), "processing_failed")
+            raise DocumentParserException(error_msg, self.get_service_name(), "processing_failed") from e
 
     def _process_pdf(self, file_path: str, params: dict[str, Any]) -> str:
-        """Process PDF by converting pages to images"""
+        """把 PDF 每页渲染为 PNG 后交给远端 OCR。"""
         with PDFIUM_LOCK:
             pdf = pdfium.PdfDocument(file_path)
         try:
-            full_text = []
+            full_text: list[str] = []
 
             with PDFIUM_LOCK:
                 total_pages = len(pdf)
@@ -137,14 +128,14 @@ class DeepSeekOCRParser(DocumentEngine):
                 pdf.close()
 
     def _process_image(self, file_path: str, params: dict[str, Any]) -> str:
-        """Process single image file"""
+        """读取单张图片并调用远端 OCR。"""
         mime_type = self._get_mime_type(file_path)
-        with open(file_path, "rb") as f:
-            file_content = f.read()
+        with open(file_path, "rb") as stream:
+            file_content = stream.read()
         return self._call_api(file_content, mime_type, params)
 
     def _call_api(self, data_bytes: bytes, mime_type: str, params: dict[str, Any]) -> str:
-        """Call SiliconFlow API"""
+        """提交 data URL 并清洗模型返回的引用标记。"""
         encoded_string = base64.b64encode(data_bytes).decode("utf-8")
         data_url = f"data:{mime_type};base64,{encoded_string}"
 
@@ -180,13 +171,11 @@ class DeepSeekOCRParser(DocumentEngine):
         result = response.json()
         content = result["choices"][0]["message"]["content"]
 
-        # Clean up special tags like <|ref|>...<|/ref|> and <|det|>...<|/det|>
         content = re.sub(r"<\|ref\|>.*?<\|/ref\|>", "", content)
         content = re.sub(r"<\|det\|>.*?<\|/det\|>", "", content)
-        # content = re.sub(r"<\|.*?\|>", "", content)
-
         return content.strip()
 
     def _get_mime_type(self, file_path: str) -> str:
+        """按扩展名返回图片 MIME，未知扩展名按 JPEG 处理。"""
         file_ext = Path(file_path).suffix.lower()
-        return self.MIME_TYPE_MAP.get(file_ext, "image/jpeg")  # Default fallback
+        return self.MIME_TYPE_MAP.get(file_ext, "image/jpeg")

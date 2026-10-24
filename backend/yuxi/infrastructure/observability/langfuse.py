@@ -11,13 +11,19 @@ from urllib.parse import urlparse
 
 from yuxi.infrastructure.observability.logging import logger
 
+try:
+    from langfuse import Langfuse
+    from langfuse.langchain import CallbackHandler
+except Exception:  # pragma: no cover - optional dependency during local test collection
+    Langfuse = None  # type: ignore[assignment]
+    CallbackHandler = None  # type: ignore[assignment]
+
 _FALSE_VALUES = {"0", "false", "no", "off"}
-
-
 _DEFAULT_LANGFUSE_BASE_URL = "https://cloud.langfuse.com"
 
 
 def is_langfuse_enabled() -> bool:
+    """判断部署是否启用 Langfuse 且 SDK 与密钥齐备。"""
     enabled_raw = (os.getenv("LANGFUSE_ENABLED") or "true").strip().lower()
     if enabled_raw in _FALSE_VALUES:
         return False
@@ -30,6 +36,7 @@ def is_langfuse_enabled() -> bool:
 
 @lru_cache(maxsize=1)
 def get_langfuse_client() -> Langfuse | None:
+    """返回进程级客户端；未启用或初始化失败时返回 None。"""
     if not is_langfuse_enabled():
         return None
 
@@ -48,12 +55,6 @@ def get_langfuse_client() -> Langfuse | None:
         return None
 
 
-def _utc_nanoseconds(value: datetime) -> str:
-    """把持久 UTC 时间转换为 OTLP 纳秒时间戳。"""
-    aware = value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
-    return str(int(aware.timestamp() * 1_000_000_000))
-
-
 def export_turn_root(
     *,
     trace_id: str,
@@ -66,6 +67,10 @@ def export_turn_root(
     finished_at: datetime,
 ) -> None:
     """以已持久化的因果 ID 向 Langfuse 导出完整 Turn 根跨度。"""
+    client = get_langfuse_client()
+    if client is None:
+        return
+
     from langfuse.api.opentelemetry.types import (
         OtelAttribute,
         OtelAttributeValue,
@@ -75,9 +80,6 @@ def export_turn_root(
         OtelSpan,
     )
 
-    client = get_langfuse_client()
-    if client is None:
-        return
     attributes = [
         OtelAttribute(key=key, value=OtelAttributeValue(string_value=value))
         for key, value in (
@@ -101,7 +103,7 @@ def export_turn_root(
                                 trace_id=trace_id,
                                 span_id=root_id,
                                 name="agent.turn",
-                                kind=1,
+                                kind=1,  # OTLP SpanKind.INTERNAL
                                 start_time_unix_nano=_utc_nanoseconds(created_at),
                                 end_time_unix_nano=_utc_nanoseconds(finished_at),
                                 attributes=attributes,
@@ -118,17 +120,6 @@ def export_turn_root(
             "additional_headers": {"x-langfuse-ingestion-version": "4"},
         },
     )
-
-
-def _http_origin(url: str) -> tuple[str, str, int] | None:
-    try:
-        parsed_url = urlparse(url.strip())
-        if parsed_url.scheme not in {"http", "https"} or not parsed_url.hostname:
-            return None
-        default_port = 443 if parsed_url.scheme == "https" else 80
-        return parsed_url.scheme, parsed_url.hostname.casefold(), parsed_url.port or default_port
-    except ValueError:
-        return None
 
 
 async def get_trace_url_by_id_async(trace_id: str, *, timeout: float = 5.0) -> str | None:
@@ -162,6 +153,7 @@ async def get_trace_url_by_id_async(trace_id: str, *, timeout: float = 5.0) -> s
 
 
 def flush_langfuse() -> None:
+    """尽力刷新已排队事件，失败不阻塞业务。"""
     client = get_langfuse_client()
     if client is None:
         return
@@ -172,9 +164,19 @@ def flush_langfuse() -> None:
         logger.warning(f"刷新 Langfuse 事件失败: {exc}")
 
 
-try:
-    from langfuse import Langfuse
-    from langfuse.langchain import CallbackHandler
-except Exception:  # pragma: no cover - optional dependency during local test collection
-    Langfuse = None  # type: ignore[assignment]
-    CallbackHandler = None  # type: ignore[assignment]
+def _utc_nanoseconds(value: datetime) -> str:
+    """把持久 UTC 时间转换为 OTLP 纳秒时间戳。"""
+    aware = value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
+    return str(int(aware.timestamp() * 1_000_000_000))
+
+
+def _http_origin(url: str) -> tuple[str, str, int] | None:
+    """解析 http(s) 源站，非法 URL 返回 None。"""
+    try:
+        parsed_url = urlparse(url.strip())
+        if parsed_url.scheme not in {"http", "https"} or not parsed_url.hostname:
+            return None
+        default_port = 443 if parsed_url.scheme == "https" else 80
+        return parsed_url.scheme, parsed_url.hostname.casefold(), parsed_url.port or default_port
+    except ValueError:
+        return None

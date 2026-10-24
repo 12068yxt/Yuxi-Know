@@ -14,7 +14,7 @@ _OFFICE_PDF_EXTENSIONS = frozenset({".docx", ".pptx"})
 
 def _office_conversion_timeout_seconds() -> int:
     """读取既有部署配置中的转换超时。"""
-    # 保留部署使用的环境变量名。
+    # 预览是可选能力；既有部署可能保留非数字值，非法配置回退默认超时。
     raw = os.getenv("OFFICE_PREVIEW_TIMEOUT_SECONDS", "60")
     try:
         return int(raw)
@@ -77,11 +77,10 @@ def _convert_office_to_pdf_sync(filename: str, content: bytes) -> bytes:
             )
         except subprocess.TimeoutExpired as exc:
             raise OfficeConversionError(f"Office 文件转换 PDF 超时（{OFFICE_CONVERSION_TIMEOUT_SECONDS} 秒）") from exc
+        detail = (result.stderr or result.stdout).decode("utf-8", errors="ignore").strip()
         if result.returncode != 0:
-            detail = (result.stderr or result.stdout).decode("utf-8", errors="ignore").strip()
             raise OfficeConversionError(f"Office 文件转换 PDF 失败: {detail or 'LibreOffice 执行失败'}")
         if not output_path.exists():
-            detail = (result.stderr or result.stdout).decode("utf-8", errors="ignore").strip()
             raise OfficeConversionError(f"Office 文件转换 PDF 失败: 未生成 PDF 文件。{detail}")
 
         pdf_content = output_path.read_bytes()

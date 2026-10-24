@@ -22,6 +22,28 @@ def test_mineru_parser_normalizes_trailing_slash():
     assert parser.parse_endpoint == "http://mineru-api:30001/file_parse"
 
 
+def test_mineru_error_detail_falls_back_for_non_object_json():
+    """错误响应不是 JSON 对象时仍返回正文，不改变 HTTP 错误分类。"""
+    parser = MinerUParser()
+    response = SimpleNamespace(status_code=500, text="fixture failure", json=lambda: ["not-an-object"])
+
+    assert parser._response_error_detail(response) == "fixture failure"
+
+
+def test_mineru_health_check_reports_malformed_info_as_unhealthy(monkeypatch):
+    """发现文档的 info 非对象时保留“响应格式错误”，不升级为通用 error。"""
+    response = SimpleNamespace(
+        status_code=200,
+        json=lambda: {"paths": {"/file_parse": {}}, "info": []},
+    )
+    monkeypatch.setattr("yuxi.infrastructure.document_parsing.engines.mineru.requests.get", lambda *args, **kwargs: response)
+
+    health = MinerUParser().check_health()
+
+    assert health["status"] == "unhealthy"
+    assert "响应格式错误" in health["message"]
+
+
 @pytest.mark.parametrize(
     ("defaults", "params", "expected"),
     [

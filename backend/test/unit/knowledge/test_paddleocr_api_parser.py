@@ -61,7 +61,7 @@ def test_layout_images_preserve_titles_and_reference_links(tmp_path, monkeypatch
         text = parser._extract_markdown([{"result": {"layoutParsingResults": [item]}}], tmp_path, {})
     else:
         parser = PPStructureV3Parser(server_url="https://ocr.example.test")
-        text = parser._parse_api_result({"result": {"layoutParsingResults": [item]}}, "source.pdf", tmp_path)["full_text"]
+        text = parser._parse_api_result({"result": {"layoutParsingResults": [item]}}, tmp_path)["full_text"]
     links = local_image_links(text)
     assert len(links) == 1
     assert (tmp_path / links[0]).read_bytes() == b"chart"
@@ -78,9 +78,7 @@ def test_layout_images_preserve_titles_and_reference_links(tmp_path, monkeypatch
             "job-vl",
             {
                 "result": {
-                    "layoutParsingResults": [
-                        {"markdown": {"text": "VL markdown", "images": {}}, "outputImages": {"debug": "ignored"}}
-                    ]
+                    "layoutParsingResults": [{"markdown": {"text": "VL markdown", "images": {}}, "outputImages": {"debug": "ignored"}}]
                 }
             },
             "VL markdown",

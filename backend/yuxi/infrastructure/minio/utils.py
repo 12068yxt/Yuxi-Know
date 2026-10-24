@@ -37,6 +37,7 @@ async def upload_image_to_minio(
     if len(file_content) > max_size_bytes:
         raise ValueError(too_large_message)
 
+    invalid_image_message = "只能上传 PNG、JPEG、WebP 或 GIF 图片"
     allowed_formats = {"PNG": "png", "JPEG": "jpg", "WEBP": "webp", "GIF": "gif"}
     try:
         with warnings.catch_warnings():
@@ -44,7 +45,7 @@ async def upload_image_to_minio(
             with Image.open(BytesIO(file_content)) as image:
                 file_extension = allowed_formats.get(image.format or "")
                 if file_extension is None:
-                    raise ValueError("只能上传 PNG、JPEG、WebP 或 GIF 图片")
+                    raise ValueError(invalid_image_message)
 
                 for frame_index in range(getattr(image, "n_frames", 1)):
                     image.seek(frame_index)
@@ -56,7 +57,7 @@ async def upload_image_to_minio(
         OSError,
         SyntaxError,
     ) as exc:
-        raise ValueError("只能上传 PNG、JPEG、WebP 或 GIF 图片") from exc
+        raise ValueError(invalid_image_message) from exc
 
     object_name = f"{object_prefix.strip('/')}/{uuid.uuid4()}.{file_extension}"
     return await aupload_file_to_minio("public", object_name, file_content)

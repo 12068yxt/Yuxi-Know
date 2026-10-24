@@ -5,10 +5,13 @@ import os
 import shutil
 import stat
 from collections.abc import Awaitable, Iterator
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from pathlib import Path
 
 _DIRECTORY_OPEN_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+_PRIVATE_DIRECTORY_MODE = 0o700
+_PRIVATE_FILE_MODE = 0o600
+_RENAME_NOREPLACE = 1
 
 
 class FileTransferLimitError(ValueError):
@@ -48,10 +51,8 @@ def open_directory_fd(root: Path | int, parts: tuple[str, ...], *, create: bool 
     try:
         for part in parts:
             if create:
-                try:
-                    os.mkdir(part, 0o700, dir_fd=directory_fd)
-                except FileExistsError:
-                    pass
+                with suppress(FileExistsError):
+                    os.mkdir(part, _PRIVATE_DIRECTORY_MODE, dir_fd=directory_fd)
             try:
                 child_fd = os.open(part, _DIRECTORY_OPEN_FLAGS, dir_fd=directory_fd)
             except OSError as exc:
@@ -114,7 +115,8 @@ def copy_file_fd(source_fd: int, target_fd: int, *, max_bytes: int) -> int:
     if max_bytes < 0:
         raise ValueError("file copy limit must be non-negative")
     total = 0
-    while chunk := os.read(source_fd, min(1024 * 1024, max_bytes - total + 1)):
+    chunk_size = 1024 * 1024
+    while chunk := os.read(source_fd, min(chunk_size, max_bytes - total + 1)):
         total += len(chunk)
         if total > max_bytes:
             raise FileTransferLimitError("file exceeds transfer limit")
@@ -137,7 +139,7 @@ def copy_directory_fd(source_fd: int, target_fd: int) -> None:
     for name in sorted(os.listdir(source_fd)):
         item_stat = os.stat(name, dir_fd=source_fd, follow_symlinks=False)
         if stat.S_ISDIR(item_stat.st_mode):
-            os.mkdir(name, 0o700, dir_fd=target_fd)
+            os.mkdir(name, _PRIVATE_DIRECTORY_MODE, dir_fd=target_fd)
             child_source = open_directory_fd(source_fd, (name,))
             try:
                 child_target = open_directory_fd(target_fd, (name,))
@@ -149,7 +151,12 @@ def copy_directory_fd(source_fd: int, target_fd: int) -> None:
                 os.close(child_source)
         else:
             with open_regular_file_fd(source_fd, (name,)) as (file_fd, _):
-                copied_fd = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=target_fd)
+                copied_fd = os.open(
+                    name,
+                    os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                    _PRIVATE_FILE_MODE,
+                    dir_fd=target_fd,
+                )
                 with os.fdopen(copied_fd, "wb") as target, os.fdopen(os.dup(file_fd), "rb") as source:
                     shutil.copyfileobj(source, target)
 
@@ -159,7 +166,7 @@ def publish_directory_fd(source_fd: int, name: str, target_fd: int, target_name:
     renameat2 = ctypes.CDLL(None, use_errno=True).renameat2
     renameat2.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_uint]
     renameat2.restype = ctypes.c_int
-    if renameat2(source_fd, os.fsencode(name), target_fd, os.fsencode(target_name), 1) != 0:  # RENAME_NOREPLACE
+    if renameat2(source_fd, os.fsencode(name), target_fd, os.fsencode(target_name), _RENAME_NOREPLACE) != 0:
         code = ctypes.get_errno()
         raise OSError(code, os.strerror(code), target_name)
 

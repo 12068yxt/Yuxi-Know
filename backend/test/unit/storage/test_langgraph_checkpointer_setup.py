@@ -75,7 +75,7 @@ async def test_langgraph_setup_uses_cross_process_advisory_lock():
     """官方 checkpoint migration 必须被 PostgreSQL advisory lock 包围。"""
     manager = object.__new__(PostgresManager)
     manager._initialized = True
-    manager._langgraph_checkpointer_setup = False
+    manager.langgraph_checkpointer_setup = False
     statements = []
 
     class Connection:
@@ -107,7 +107,7 @@ async def test_langgraph_setup_discards_connection_when_unlock_fails():
     """无法确认 advisory lock 已释放时不能把持锁 session 放回池中。"""
     manager = object.__new__(PostgresManager)
     manager._initialized = True
-    manager._langgraph_checkpointer_setup = False
+    manager.langgraph_checkpointer_setup = False
     connection_closed = False
 
     class Connection:
@@ -131,7 +131,7 @@ async def test_langgraph_setup_discards_connection_when_unlock_fails():
         await checkpointer_module.setup_langgraph_checkpointer(manager)
 
     assert connection_closed is True
-    assert manager._langgraph_checkpointer_setup is False
+    assert manager.langgraph_checkpointer_setup is False
 
 
 async def _true_row():

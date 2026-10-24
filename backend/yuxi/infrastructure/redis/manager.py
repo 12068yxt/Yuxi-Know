@@ -9,15 +9,18 @@ from __future__ import annotations
 import asyncio
 import os
 from collections.abc import Iterator
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from dataclasses import dataclass, replace
-from typing import Any
+from typing import Any, Self
 from urllib.parse import urlparse, urlunparse
 
 from yuxi.infrastructure.runtime_settings import get_int_env
 
 DEFAULT_REDIS_URL = "redis://redis:6379/0"
 DEFAULT_REDIS_MAX_CONNECTIONS = 32
+
+_async_redis_client: Any | None = None
+_async_redis_lock: asyncio.Lock | None = None
 
 
 @dataclass(frozen=True)
@@ -37,25 +40,30 @@ class RedisConfig:
         decode_responses: bool | None = None,
         socket_timeout: float | None = None,
         socket_connect_timeout: float | None = None,
-    ) -> RedisConfig:
+    ) -> Self:
+        """从部署环境读取连接配置，显式参数优先于环境变量。"""
+        url = os.environ.get("REDIS_URL", DEFAULT_REDIS_URL)
+        max_connections = get_int_env("REDIS_MAX_CONNECTIONS", DEFAULT_REDIS_MAX_CONNECTIONS)
+        resolved_decode_responses = True if decode_responses is None else decode_responses
+        resolved_socket_timeout = socket_timeout if socket_timeout is not None else _float_or_none(os.environ.get("REDIS_SOCKET_TIMEOUT"))
+        resolved_connect_timeout = (
+            socket_connect_timeout if socket_connect_timeout is not None else _float_or_none(os.environ.get("REDIS_CONNECT_TIMEOUT"))
+        )
         return cls(
-            url=os.environ.get("REDIS_URL", DEFAULT_REDIS_URL),
-            max_connections=get_int_env(
-                "REDIS_MAX_CONNECTIONS",
-                DEFAULT_REDIS_MAX_CONNECTIONS,
-            ),
-            decode_responses=True if decode_responses is None else decode_responses,
-            socket_timeout=socket_timeout if socket_timeout is not None else _float_or_none(os.environ.get("REDIS_SOCKET_TIMEOUT")),
-            socket_connect_timeout=socket_connect_timeout
-            if socket_connect_timeout is not None
-            else _float_or_none(os.environ.get("REDIS_CONNECT_TIMEOUT")),
+            url=url,
+            max_connections=max_connections,
+            decode_responses=resolved_decode_responses,
+            socket_timeout=resolved_socket_timeout,
+            socket_connect_timeout=resolved_connect_timeout,
         )
 
     @property
     def log_url(self) -> str:
+        """返回可安全写入日志的连接地址。"""
         return redact_redis_url(self.url)
 
     def connection_kwargs(self) -> dict[str, Any]:
+        """返回底层 Redis 客户端需要的连接参数。"""
         kwargs: dict[str, Any] = {
             "decode_responses": self.decode_responses,
             "max_connections": self.max_connections,
@@ -68,11 +76,13 @@ class RedisConfig:
 
 
 def redact_redis_url(url: str) -> str:
-    """隐藏 url 中的密码部分用于日志输出。"""
+    """隐藏 URL 中的密码用于日志输出；脱敏失败时原样返回。"""
     try:
         parsed = urlparse(url)
         if parsed.password:
-            parsed = parsed._replace(netloc=parsed.netloc.replace(parsed.password, "***"))
+            userinfo, _, host = parsed.netloc.rpartition("@")
+            username, _, _ = userinfo.partition(":")
+            parsed = parsed._replace(netloc=f"{username}:***@{host}")
         return urlunparse(parsed)
     except Exception:
         return url
@@ -128,10 +138,6 @@ async def create_async_redis_client(config: RedisConfig | None = None, *, ping: 
     return client
 
 
-_async_redis_client: Any | None = None
-_async_redis_lock: asyncio.Lock | None = None
-
-
 async def get_async_redis_client(config: RedisConfig | None = None) -> Any:
     """获取共享异步 Redis 客户端。"""
     global _async_redis_client
@@ -184,18 +190,14 @@ def _float_or_none(value: str | None) -> float | None:
 
 def _close_sync_client(client: Any) -> None:
     """尽力关闭同步客户端，不遮蔽调用方的主异常。"""
-    try:
+    with suppress(Exception):
         client.close()
-    except Exception:
-        pass
 
 
 async def _close_async_client(client: Any) -> None:
     """尽力关闭异步客户端，不遮蔽调用方的主异常。"""
-    try:
+    with suppress(Exception):
         await client.aclose()
-    except Exception:
-        pass
 
 
 def _get_async_redis_lock() -> asyncio.Lock:

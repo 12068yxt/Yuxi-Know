@@ -9,6 +9,7 @@ import time
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
+from uuid import uuid4
 
 import requests
 
@@ -20,8 +21,13 @@ from yuxi.infrastructure.observability.logging import logger
 DEFAULT_PADDLEOCR_API_URL = "https://paddleocr.aistudio-app.com/api/v2/ocr/jobs"
 
 
+def _is_remote_url(value: str) -> bool:
+    """判断输入是否为可直接提交的 HTTP(S) 地址。"""
+    return value.startswith(("http://", "https://"))
+
+
 class PaddleOCRAPIParser(DocumentEngine):
-    """Base parser for PaddleOCR cloud jobs API."""
+    """PaddleOCR 云端 jobs API 的公共提交与轮询流程。"""
 
     model = ""
     default_optional_payload: dict[str, bool] = {}
@@ -31,6 +37,7 @@ class PaddleOCRAPIParser(DocumentEngine):
         self.api_url = (api_url or os.getenv("PADDLEOCR_API_URL") or DEFAULT_PADDLEOCR_API_URL).rstrip("/")
 
     def check_health(self) -> dict[str, Any]:
+        """只报告 token 配置状态，不创建真实任务。"""
         if not self.api_token:
             return {
                 "status": "unavailable",
@@ -45,7 +52,8 @@ class PaddleOCRAPIParser(DocumentEngine):
         }
 
     def process_file(self, file_path: str, output_dir: Path, params: dict[str, Any] | None = None) -> str:
-        if not os.path.exists(file_path) and not file_path.startswith(("http://", "https://")):
+        """提交本地文件或远端 URL，轮询结果并提取 Markdown。"""
+        if not os.path.exists(file_path) and not _is_remote_url(file_path):
             raise DocumentParserException(f"文件不存在: {file_path}", self.get_service_name(), "file_not_found")
 
         file_ext = self._file_extension(file_path)
@@ -86,7 +94,8 @@ class PaddleOCRAPIParser(DocumentEngine):
         return {"Authorization": f"bearer {self.api_token}"}
 
     def _file_extension(self, file_path: str) -> str:
-        if file_path.startswith(("http://", "https://")):
+        """从本地路径或 URL 的路径部分提取小写扩展名。"""
+        if _is_remote_url(file_path):
             return Path(urlparse(file_path).path).suffix.lower()
         return Path(file_path).suffix.lower()
 
@@ -106,7 +115,7 @@ class PaddleOCRAPIParser(DocumentEngine):
         optional_payload = self._resolve_optional_payload(params)
         headers = self._headers()
 
-        if file_path.startswith(("http://", "https://")):
+        if _is_remote_url(file_path):
             response = requests.post(
                 self.api_url,
                 headers={**headers, "Content-Type": "application/json"},
@@ -215,8 +224,6 @@ class PaddleOCRAPIParser(DocumentEngine):
             )
         content_type = response.headers.get("Content-Type", "image/png").split(";")[0]
         suffix = mimetypes.guess_extension(content_type) or ".png"
-        from uuid import uuid4
-
         return save_resource(output_dir, f"images/{uuid4().hex}{suffix}", response.content)
 
 

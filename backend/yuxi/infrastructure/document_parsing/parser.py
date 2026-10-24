@@ -23,6 +23,7 @@ from pypdf import PdfReader
 
 from yuxi.infrastructure.document_parsing import IMAGE_FILE_EXTENSIONS, ParseOptions, ParseResult
 from yuxi.infrastructure.document_parsing.artifacts import (
+    ensure_no_symlink_ancestors,
     extract_markdown_archive,
     local_image_links,
     replace_image_links,
@@ -132,6 +133,7 @@ def _convert_document(source: Path, output_dir: Path, options: ParseOptions) -> 
 
 def _parse_ocr(source: Path, output_dir: Path, options: ParseOptions) -> str:
     """按显式引擎解析 PDF 或图片，禁用 OCR 时只读取 PDF 文本。"""
+    # 具体引擎按需导入，避免 API 启动时加载 OCR 依赖。
     from yuxi.infrastructure.document_parsing.engines import get_engine, get_engine_spec
 
     if options.ocr_engine == "disable":
@@ -152,11 +154,7 @@ def _copy_markdown_resources(source: Path, output_dir: Path, markdown: str) -> s
     for link in local_image_links(markdown):
         relative = resource_path(unquote(link))
         resource = source.parent / relative
-        for part in (resource, *resource.parents):
-            if part.is_symlink():
-                raise ValueError(f"源资源包含符号链接: {link}")
-            if part == source.parent:
-                break
+        ensure_no_symlink_ancestors(resource, source.parent, error_message=f"源资源包含符号链接: {link}")
         target = f"images/{relative}"
         if target not in copied:
             save_resource(output_dir, target, resource.read_bytes())
@@ -192,6 +190,7 @@ def _convert_office_document(file_path: Path) -> DoclingDocument:
         raise ValueError(f"Docling 不支持该 Office 格式: {file_path.suffix}") from exc
 
     input_document = InputDocument(file_path, input_format, backend_type)
+    # Docling Slim 仅通过 InputDocument 持有已初始化的格式 backend。
     backend = getattr(input_document, "_backend", None)
     if backend is None:
         raise RuntimeError(f"Docling 无法读取 Office 文件: {file_path.name}")
@@ -205,6 +204,7 @@ def _convert_office_document(file_path: Path) -> DoclingDocument:
 
 
 def _convert_csv_to_markdown(file_path: Path) -> str:
+    """把 CSV 的每一行渲染为独立 Markdown 表格，列类型由 pandas 推断。"""
     import pandas as pd
 
     dataframe = pd.read_csv(file_path)

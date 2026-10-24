@@ -10,7 +10,7 @@ def get_public_url() -> str:
     """读取部署固定的公开站点来源，不接受路径或请求头推导。"""
     value = os.getenv("YUXI_PUBLIC_URL", "")
     parsed = urlsplit(value)
-    _ = parsed.port
+    _ = parsed.port  # 读取 port 会触发 urlsplit 对非法端口的校验
     if (
         parsed.scheme not in {"http", "https"}
         or not parsed.hostname

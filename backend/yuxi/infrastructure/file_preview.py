@@ -9,6 +9,8 @@ from yuxi.shared.files import MAX_FILE_PREVIEW_BYTES, PreviewResult, detect_medi
 
 MAX_TEXT_PREVIEW_CHARS = 250_000
 
+_PREVIEW_HEAD_BYTES = 1024
+
 _MARKDOWN_EXTENSIONS = frozenset({".md", ".markdown", ".mdx"})
 _PDF_EXTENSIONS = frozenset({".pdf"})
 _HTML_EXTENSIONS = frozenset({".html", ".htm"})
@@ -76,22 +78,12 @@ def prepare_file_preview(path: str, raw_content: bytes) -> PreviewResult:
             filename=PurePosixPath(path).name or "preview",
         )
     if not supported:
-        return PreviewResult(
-            content=None,
-            preview_type=preview_type,
-            supported=supported,
-            message=message,
-        )
+        return _unsupported_preview(message)
 
     try:
         content = raw_content.decode("utf-8")
     except UnicodeDecodeError:
-        return PreviewResult(
-            content=None,
-            preview_type="unsupported",
-            supported=False,
-            message="当前文件不是 UTF-8 文本，暂不支持预览",
-        )
+        return _unsupported_preview("当前文件不是 UTF-8 文本，暂不支持预览")
 
     truncated = len(content) > MAX_TEXT_PREVIEW_CHARS
     if truncated:
@@ -110,7 +102,7 @@ def detect_preview_type(path: str, raw_content: bytes) -> tuple[str, bool, str |
     """判断文件可用的展示类型与不支持原因。"""
     suffix = PurePosixPath(path).suffix.lower()
     mime_type, _encoding = mimetypes.guess_type(path)
-    head = raw_content[:1024]
+    head = raw_content[:_PREVIEW_HEAD_BYTES]
 
     if suffix in _IMAGE_EXTENSIONS or (mime_type and mime_type.startswith("image/")):
         return "image", True, None
@@ -146,10 +138,19 @@ def detect_preview_type(path: str, raw_content: bytes) -> tuple[str, bool, str |
 
 def preview_too_large() -> PreviewResult:
     """返回超出预览大小限制的结果。"""
+    limit_mb = MAX_FILE_PREVIEW_BYTES // (1024 * 1024)
+    return _unsupported_preview(
+        f"文件过大，当前仅支持 {limit_mb} MB 以内的文件预览",
+        limit=MAX_FILE_PREVIEW_BYTES,
+    )
+
+
+def _unsupported_preview(message: str | None, *, limit: int | None = None) -> PreviewResult:
+    """构造不支持的预览结果，统一空内容与状态字段。"""
     return PreviewResult(
         content=None,
         preview_type="unsupported",
         supported=False,
-        message="文件过大，当前仅支持 30 MB 以内的文件预览",
-        limit=MAX_FILE_PREVIEW_BYTES,
+        message=message,
+        limit=limit,
     )
