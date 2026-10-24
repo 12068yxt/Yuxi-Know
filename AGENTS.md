@@ -67,7 +67,7 @@ docker compose exec api uv run --no-sync --group test pytest test/unit -m "not s
 - 实现明显长于问题本身，或一半行数可以清楚表达同样行为时，先简化再提交；自检"高级工程师是否会认为这段代码过度设计、过度防御或过于零碎"。
 - 不可信输入只在 parser、配置、模型/tool JSON、持久化、worker、process、wire 和用户路径等真实信任边界校验；授权与隔离在产生副作用的 executor/repository fail-closed，直接或替代调用路径都不能绕过。
 - 预设条件不成立时显式失败。可选能力可以降级，但必须结构化、可观察，且不把未就绪伪装为成功。
-- 新增函数/类使用简洁中文 docstring；注释只解释非显然约束、时序、Owner 和安全用法，不复述代码。
+- 新增函数/类使用简洁中文 docstring；注释解释非显然约束、时序、Owner 和安全用法，较长处理段可在段首用一句话概括职责与阶段，不逐行翻译代码。
 - 不输出或提交 `.env`、账号、Token、用户数据、运行目录和构建产物。
 - 文件以一个换行结尾；提交前运行 `git diff --check`。
 
