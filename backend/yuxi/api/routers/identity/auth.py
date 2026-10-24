@@ -1,3 +1,5 @@
+"""认证、用户管理与 CLI 浏览器登录授权路由。"""
+
 import re
 from typing import Literal
 
@@ -41,11 +43,9 @@ from yuxi.modules.identity.services.login_limits import extract_client_ip
 from yuxi.modules.identity.services.password_login import PasswordLoginRejected, login_with_password
 from yuxi.modules.identity.services.usernames import is_valid_phone_number, validate_username
 
-# 创建路由器
 auth = APIRouter(prefix="/auth", tags=["authentication"])
 
 
-# 请求和响应模型
 class Token(BaseModel):
     access_token: str
     token_type: str
@@ -179,22 +179,7 @@ class CLIAuthTokenResponse(BaseModel):
     user: dict
 
 
-# =============================================================================
-# === 工具函数 ===
-# =============================================================================
-
-
-def _raise_cli_auth_error(exc: CLIAuthError) -> None:
-    raise HTTPException(
-        status_code=exc.status_code,
-        detail={"error": exc.code, "message": exc.message},
-    ) from exc
-
-
-# 路由：登录获取令牌
-# =============================================================================
-# === 认证分组 ===
-# =============================================================================
+# --- 密码认证 ---
 
 
 @auth.post("/token", response_model=Token)
@@ -228,13 +213,12 @@ async def login_for_access_token(
     return result
 
 
-# =============================================================================
-# === CLI 浏览器登录授权分组 ===
-# =============================================================================
+# --- CLI 浏览器登录授权 ---
 
 
 @auth.post("/cli/sessions", response_model=CLIAuthSessionCreateResponse)
 async def create_cli_session(data: CLIAuthSessionCreate, db: AsyncSession = Depends(get_db)):
+    """创建 CLI 设备授权会话，返回轮询参数。"""
     session, device_code = await create_cli_auth_session(db, key_name=data.key_name)
     return CLIAuthSessionCreateResponse(
         device_code=device_code,
@@ -251,6 +235,7 @@ async def get_cli_session(
     _current_user: User = Depends(get_required_user),
     db: AsyncSession = Depends(get_db),
 ):
+    """读取当前用户创建的 CLI 授权会话状态。"""
     try:
         session = await get_cli_auth_session_for_user(db, user_code)
     except CLIAuthError as exc:
@@ -264,6 +249,7 @@ async def approve_cli_session(
     current_user: User = Depends(get_required_user),
     db: AsyncSession = Depends(get_db),
 ):
+    """当前用户批准指定 CLI 设备的授权请求。"""
     try:
         session = await approve_cli_auth_session(db, user_code, current_user)
     except CLIAuthError as exc:
@@ -273,21 +259,22 @@ async def approve_cli_session(
 
 @auth.post("/cli/sessions/token", response_model=CLIAuthTokenResponse)
 async def exchange_cli_session_token(data: CLIAuthTokenRequest, db: AsyncSession = Depends(get_db)):
+    """设备凭 device_code 兑换 API Key。"""
     try:
         return await exchange_cli_auth_token(db, data.device_code)
     except CLIAuthError as exc:
         _raise_cli_auth_error(exc)
 
 
-# 路由：校验是否需要初始化管理员
 @auth.get("/check-first-run")
 async def check_first_run():
+    """报告系统是否尚未初始化管理员。"""
     return {"first_run": await user_service.is_first_run()}
 
 
-# 路由：初始化管理员账户
 @auth.post("/initialize", response_model=Token)
 async def initialize_admin(admin_data: InitializeAdmin, db: AsyncSession = Depends(get_db)):
+    """初始化系统管理员并直接返回登录令牌。"""
     # 验证用户ID格式（只支持字母数字和下划线）
     if not re.match(r"^[a-zA-Z0-9_]+$", admin_data.uid):
         raise HTTPException(
@@ -326,10 +313,7 @@ async def initialize_admin(admin_data: InitializeAdmin, db: AsyncSession = Depen
     return login_result(new_admin, access_token, created.department.name)
 
 
-# 路由：获取当前用户信息
-# =============================================================================
-# === 用户信息分组 ===
-# =============================================================================
+# --- 用户信息 ---
 
 
 @auth.get("/me", response_model=UserResponse)
@@ -342,7 +326,6 @@ async def read_users_me(current_user: User = Depends(get_required_user), db: Asy
     return user_dict
 
 
-# 路由：更新个人资料
 @auth.put("/profile", response_model=UserResponse)
 async def update_profile(
     profile_data: UserProfileUpdate,
@@ -353,10 +336,7 @@ async def update_profile(
     return await user_service.update_profile(db, current_user=current_user, **profile_data.model_dump())
 
 
-# 路由：创建新用户（管理员权限）
-# =============================================================================
-# === 用户管理分组 ===
-# =============================================================================
+# --- 用户管理 ---
 
 
 @auth.post("/users", response_model=UserResponse)
@@ -394,7 +374,6 @@ async def read_users_page(
     )
 
 
-# 路由：获取所有用户（管理员权限）
 @auth.get("/users", response_model=list[UserResponse])
 async def read_users(
     skip: int = 0,
@@ -402,6 +381,7 @@ async def read_users(
     current_user: User = Depends(get_admin_user),
     db: AsyncSession = Depends(get_db),
 ):
+    """获取所有用户（管理员权限）。"""
     return await user_service.list_users(db, current_user=current_user, skip=skip, limit=limit)
 
 
@@ -412,16 +392,17 @@ async def read_user_access_options(
     current_user: User = Depends(get_admin_user),
     db: AsyncSession = Depends(get_db),
 ):
+    """获取用户访问选项（管理员权限）。"""
     return await user_service.list_access_options(db, skip=skip, limit=limit)
 
 
-# 路由：获取特定用户信息（管理员权限）
 @auth.get("/users/{user_id}", response_model=UserResponse)
 async def read_user(
     user_id: int,
     current_user: User = Depends(get_admin_user),
     db: AsyncSession = Depends(get_db),
 ):
+    """获取特定用户信息（管理员权限）。"""
     user = await user_service.get_managed_user(db, current_user=current_user, user_id=user_id)
     if user is None:
         raise HTTPException(
@@ -431,7 +412,6 @@ async def read_user(
     return user.to_dict()
 
 
-# 路由：更新用户信息（管理员权限）
 @auth.put("/users/{user_id}", response_model=UserResponse)
 async def update_user(
     user_id: int,
@@ -443,7 +423,6 @@ async def update_user(
     return await user_service.update_user(db, current_user=current_user, user_id=user_id, **user_data.model_dump())
 
 
-# 路由：删除用户（管理员权限）
 @auth.delete("/users/{user_id}", response_model=dict)
 async def delete_user(
     user_id: int,
@@ -454,7 +433,6 @@ async def delete_user(
     return await user_service.delete_user(db, current_user=current_user, user_id=user_id)
 
 
-# 路由：验证用户名并生成user_id
 @auth.post("/validate-username", response_model=UidGeneration)
 async def validate_username_and_generate_uid(
     validation_data: UsernameValidation,
@@ -481,7 +459,6 @@ async def validate_username_and_generate_uid(
     return UidGeneration(username=validation_data.username, uid=uid, is_available=True)
 
 
-# 路由：检查 uid 是否可用
 @auth.get("/check-uid/{uid}")
 async def check_uid_availability(
     uid: str,
@@ -492,7 +469,6 @@ async def check_uid_availability(
     return {"uid": uid, "is_available": await user_service.is_uid_available(db, uid=uid)}
 
 
-# 路由：上传用户头像
 @auth.post("/upload-avatar")
 async def upload_user_avatar(
     file: UploadFile = File(...),
@@ -510,17 +486,15 @@ async def upload_user_avatar(
 
         return {"success": True, "avatar_url": avatar_url, "message": "头像上传成功"}
 
-    except ValueError as e:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
     except HTTPException:
         raise
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e)) from e
     except Exception as e:
-        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"头像上传失败: {str(e)}")
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"头像上传失败: {str(e)}") from e
 
 
-# =============================================================================
-# === OIDC 认证分组 ===
-# =============================================================================
+# --- OIDC 认证 ---
 
 
 @auth.get("/oidc/config", response_model=OIDCConfigResponse)
@@ -576,3 +550,11 @@ async def oidc_backchannel_logout(logout_token: str = Form(..., max_length=16384
     except DomainError as exc:
         raise HTTPException(400, "OIDC 登出通知无效") from exc
     return Response(status_code=200, headers={"Cache-Control": "no-store"})
+
+
+def _raise_cli_auth_error(exc: CLIAuthError) -> None:
+    """把 CLI 授权失败映射为携带错误码的 HTTP 响应。"""
+    raise HTTPException(
+        status_code=exc.status_code,
+        detail={"error": exc.code, "message": exc.message},
+    ) from exc

@@ -1,3 +1,5 @@
+"""后台作业查询与管理路由。"""
+
 from fastapi import APIRouter, Depends, HTTPException, Query
 
 from yuxi.api.dependencies.auth import get_admin_user

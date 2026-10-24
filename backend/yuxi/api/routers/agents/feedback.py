@@ -68,7 +68,7 @@ async def put_feedback(
     scope: ActorScope = Depends(require_web_feedback_scope),
     db: AsyncSession = Depends(get_db),
 ):
-    """只接受自身产品会话 的最终结果，提交后返回持久记录。"""
+    """只接受自身产品会话的最终结果，提交后返回持久记录。"""
     return await save_user_feedback(db=db, scope=scope, thread_id=thread_id, turn_id=turn_id, **payload.model_dump())
 
 

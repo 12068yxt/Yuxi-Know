@@ -1,7 +1,5 @@
 """把中立 Workspace preview 结果装配为 HTTP 响应。"""
 
-from __future__ import annotations
-
 import io
 import os
 from urllib.parse import quote
@@ -12,7 +10,7 @@ from starlette.background import BackgroundTask
 from yuxi.shared.files import PreparedFile, PreviewResult
 
 
-def render_file_result(result: PreparedFile | PreviewResult | dict):
+def render_file_result(result: PreparedFile | PreviewResult | dict) -> FileResponse | StreamingResponse | dict:
     """把已准备好的业务文件结果装配为 HTTP 响应。"""
     if isinstance(result, PreparedFile):
         headers = None

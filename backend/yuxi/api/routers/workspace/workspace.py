@@ -1,4 +1,4 @@
-from __future__ import annotations
+"""用户个人工作区与工作区知识文件只读视图路由。"""
 
 import io
 from urllib.parse import quote

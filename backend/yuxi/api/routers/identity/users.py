@@ -69,6 +69,7 @@ class AgentEnvResponse(BaseModel):
 
 
 async def get_logged_in_user(user: User | None = Depends(get_current_user)) -> User:
+    """要求已登录用户，但不强制部门绑定。"""
     if user is None:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
@@ -83,6 +84,7 @@ async def get_user_config(
     current_user: User = Depends(get_logged_in_user),
     db: AsyncSession = Depends(get_db),
 ):
+    """读取当前用户的偏好配置。"""
     user_config = await UserConfig.load(db, current_user.uid)
     return user_config.dump_config()
 
@@ -93,12 +95,14 @@ async def update_user_config(
     current_user: User = Depends(get_logged_in_user),
     db: AsyncSession = Depends(get_db),
 ):
+    """保存当前用户的偏好配置。"""
     user_config = await save_user_config(db, uid=current_user.uid, schema=data)
     return user_config.dump_config()
 
 
 @user_router.post("/upload-image", response_model=dict)
 async def upload_user_image(file: UploadFile = File(...), current_user: User = Depends(get_required_user)):
+    """上传用户图片到对象存储，返回访问 URL。"""
     try:
         content = await read_upload_with_limit(
             file,
@@ -134,6 +138,7 @@ async def create_api_key(
     current_user: User = Depends(get_required_user),
     db: AsyncSession = Depends(get_db),
 ):
+    """创建新的 API Key，secret 仅在响应中出现一次。"""
     return await api_key_service.create_api_key(db, actor=current_user, **data.model_dump())
 
 
@@ -154,6 +159,7 @@ async def update_api_key(
     current_user: User = Depends(get_required_user),
     db: AsyncSession = Depends(get_db),
 ):
+    """更新当前用户可管理的 API Key。"""
     return await api_key_service.update_api_key(db, actor=current_user, api_key_id=api_key_id, updates=data.model_dump(exclude_unset=True))
 
 
@@ -172,6 +178,7 @@ async def get_agent_env(
     current_user: User = Depends(get_required_user),
     db: AsyncSession = Depends(get_db),
 ):
+    """读取当前用户的 Agent 环境变量。"""
     result = await read_agent_env(db, uid=current_user.uid)
     return AgentEnvResponse(env=result.env, updated_at=format_utc_datetime(result.updated_at))
 
@@ -182,6 +189,7 @@ async def update_agent_env(
     current_user: User = Depends(get_required_user),
     db: AsyncSession = Depends(get_db),
 ):
+    """写入当前用户的 Agent 环境变量。"""
     result = await write_agent_env(db, uid=current_user.uid, env=data.env)
     return AgentEnvResponse(env=result.env, updated_at=format_utc_datetime(result.updated_at))
 

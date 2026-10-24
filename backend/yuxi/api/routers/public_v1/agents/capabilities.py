@@ -1,7 +1,5 @@
 """Thread 范围内的文件、上下文与状态能力。"""
 
-from __future__ import annotations
-
 from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
 from pydantic import BaseModel, ConfigDict
 from sqlalchemy.ext.asyncio import AsyncSession

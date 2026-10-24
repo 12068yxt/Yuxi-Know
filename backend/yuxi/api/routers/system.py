@@ -1,4 +1,7 @@
+"""系统状态、配置、日志与品牌信息路由。"""
+
 import os
+from collections import deque
 from pathlib import Path
 from typing import Literal
 
@@ -26,9 +29,7 @@ BRAND_STATIC_DIR = Path(__file__).resolve().parents[2] / "modules/system/static"
 system = APIRouter(prefix="/system", tags=["system"])
 
 
-# =============================================================================
-# === 健康检查分组 ===
-# =============================================================================
+# --- 健康检查与能力发现 ---
 
 
 @system.get("/health")
@@ -109,22 +110,7 @@ async def get_agent_feedback(
     )
 
 
-# =============================================================================
-# === 配置管理分组 ===
-# =============================================================================
-
-
-def _serialize_system_config(values: dict) -> dict:
-    fields = {
-        field["key"]: {
-            "des": field["label"],
-            "default": field.get("default"),
-            "type": field.get("type", "string"),
-            "exclude": False,
-        }
-        for field in system_options.fields
-    }
-    return {**values, "_config_items": fields}
+# --- 配置管理 ---
 
 
 @system.get("/config")
@@ -134,21 +120,6 @@ async def get_config(
 ):
     """获取系统配置"""
     return _serialize_system_config(await system_options.get(db))
-
-
-async def _ensure_web_provider_configured(db: AsyncSession, items: dict) -> None:
-    """默认网页供应商必须已有凭据；协议与凭据 Owner 保持在 extensions。"""
-    from yuxi.modules.extensions.options import WEB_PROVIDER_OPTIONS
-
-    for field in ("web_search_provider", "web_fetch_provider"):
-        provider = items.get(field)
-        if not isinstance(provider, str) or not provider.strip():
-            continue
-        option = WEB_PROVIDER_OPTIONS.get(provider.strip().lower())
-        if option is None:
-            continue
-        if not (await option.get(db)).get("api_key"):
-            raise ValueError("请先配置该供应商的 API Key")
 
 
 @system.post("/config")
@@ -192,69 +163,48 @@ async def get_system_logs(levels: str | None = None, current_user: User = Depend
         levels: 可选的日志级别过滤，多个级别用逗号分隔，如 "INFO,ERROR,DEBUG,WARNING"
     """
     try:
-        # 解析日志级别过滤条件
         level_filter = None
         if levels:
-            level_filter = set(level.strip().upper() for level in levels.split(",") if level.strip())
+            level_filter = {level.strip().upper() for level in levels.split(",") if level.strip()}
 
-        #  修复 GBK 编码报错：强制 utf-8 读取，忽略错误
+        # 只保留最后 1000 行，deque 超限自动淘汰最旧行
+        tail_lines: deque[str] = deque(maxlen=1000)
+        # 修复 GBK 编码报错：强制 utf-8 读取，忽略错误
         async with aiofiles.open(LOG_FILE, encoding="utf-8", errors="ignore") as f:
-            # 读取最后1000行
-            lines = []
             async for line in f:
-                filtered_line = line.rstrip("\n\r")
-                # 如果指定了日志级别过滤，则按级别过滤
+                content = line.rstrip("\n\r")
                 if level_filter:
                     # 日志格式: 2025-03-10 08:26:37,269 - INFO - module - message
-                    # 提取日志级别
-                    parts = filtered_line.split(" - ")
-                    if len(parts) >= 2 and parts[1].strip() in level_filter:
-                        lines.append(filtered_line + "\n")
-                    # 继续读取以保持行数统计准确
-                    if len(lines) > 1000:
-                        lines.pop(0)
-                else:
-                    lines.append(filtered_line + "\n")
-                    if len(lines) > 1000:
-                        lines.pop(0)
+                    parts = content.split(" - ")
+                    if len(parts) < 2 or parts[1].strip() not in level_filter:
+                        continue
+                tail_lines.append(content + "\n")
 
-        log = "".join(lines)
-        return {"log": log, "message": "success", "log_file": LOG_FILE, "scope": "api"}
+        return {"log": "".join(tail_lines), "message": "success", "log_file": LOG_FILE, "scope": "api"}
     except HTTPException:
         raise
     except Exception as e:
         logger.error(f"获取系统日志失败: {e}")
-        raise HTTPException(status_code=500, detail=f"获取系统日志失败: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"获取系统日志失败: {str(e)}") from e
 
 
-# =============================================================================
-# === 信息管理分组 ===
-# =============================================================================
+# --- 品牌信息 ---
 
 
 async def load_info_config():
-    """加载信息配置文件"""
+    """加载品牌信息配置；文件缺失回退模板，解析失败返回空配置。"""
     try:
-        # 配置文件路径
         brand_file_path = os.environ.get("YUXI_BRAND_FILE_PATH")
         config_path = Path(brand_file_path) if brand_file_path else BRAND_STATIC_DIR / "info.local.yaml"
 
-        # 检查文件是否存在
         if not config_path.exists():
             logger.debug(f"The config file {config_path} does not exist, using default config")
             config_path = BRAND_STATIC_DIR / "info.template.yaml"
 
-        # 异步读取配置文件
         async with aiofiles.open(config_path, encoding="utf-8") as file:
             content = await file.read()
 
-        # 注入版本号占位符
-        content = content.replace("{{YUXI_VERSION}}", get_version())
-
-        config = yaml.safe_load(content)
-
-        return config
-
+        return yaml.safe_load(content.replace("{{YUXI_VERSION}}", get_version()))
     except HTTPException:
         raise
     except Exception as e:
@@ -272,7 +222,7 @@ async def get_info_config():
         raise
     except Exception as e:
         logger.error(f"获取信息配置失败: {e}")
-        raise HTTPException(status_code=500, detail="获取信息配置失败")
+        raise HTTPException(status_code=500, detail="获取信息配置失败") from e
 
 
 @system.post("/info/reload")
@@ -285,12 +235,10 @@ async def reload_info_config(current_user: User = Depends(get_superadmin_user)):
         raise
     except Exception as e:
         logger.error(f"重新加载信息配置失败: {e}")
-        raise HTTPException(status_code=500, detail="重新加载信息配置失败")
+        raise HTTPException(status_code=500, detail="重新加载信息配置失败") from e
 
 
-# =============================================================================
-# === 通用配置项与 OCR 分组 ===
-# =============================================================================
+# --- 通用配置项与 OCR ---
 
 
 class ConfigOptionValuePayload(BaseModel):
@@ -387,3 +335,32 @@ async def transfer_resource_owner(
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     return {"success": True}
+
+
+def _serialize_system_config(values: dict) -> dict:
+    """把系统配置值与字段元数据组装为前端契约。"""
+    fields = {
+        field["key"]: {
+            "des": field["label"],
+            "default": field.get("default"),
+            "type": field.get("type", "string"),
+            "exclude": False,
+        }
+        for field in system_options.fields
+    }
+    return {**values, "_config_items": fields}
+
+
+async def _ensure_web_provider_configured(db: AsyncSession, items: dict) -> None:
+    """默认网页供应商必须已有凭据；协议与凭据 Owner 保持在 extensions。"""
+    from yuxi.modules.extensions.options import WEB_PROVIDER_OPTIONS
+
+    for field in ("web_search_provider", "web_fetch_provider"):
+        provider = items.get(field)
+        if not isinstance(provider, str) or not provider.strip():
+            continue
+        option = WEB_PROVIDER_OPTIONS.get(provider.strip().lower())
+        if option is None:
+            continue
+        if not (await option.get(db)).get("api_key"):
+            raise ValueError("请先配置该供应商的 API Key")

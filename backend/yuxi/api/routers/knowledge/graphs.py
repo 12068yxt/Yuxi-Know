@@ -1,3 +1,5 @@
+"""Milvus 知识库图谱查询路由。"""
+
 from fastapi import APIRouter, Depends, HTTPException, Query
 
 from yuxi.api.dependencies.auth import get_admin_user
@@ -9,18 +11,6 @@ from yuxi.modules.knowledge.graphs.service import KnowledgeGraphService
 from yuxi.modules.knowledge.runtime import knowledge_base
 
 graph = APIRouter(prefix="/graph", tags=["graph"])
-
-
-async def _get_graph_service(kb_id: str) -> KnowledgeGraphService:
-    kb_info = await knowledge_base.get_knowledge_base_info(kb_id)
-    if not kb_info:
-        raise HTTPException(status_code=404, detail="Knowledge base not found")
-
-    kb_type = kb_info.kb_type.lower()
-    if kb_type != "milvus":
-        raise HTTPException(status_code=404, detail="Graph API only supports Milvus knowledge bases")
-
-    return KnowledgeGraphService(kb_id=kb_id)
 
 
 @graph.get("/list")
@@ -110,4 +100,17 @@ async def get_graph_stats(
         raise
     except Exception as e:
         logger.error(f"Failed to get stats: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to get stats: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to get stats: {str(e)}") from e
+
+
+async def _get_graph_service(kb_id: str) -> KnowledgeGraphService:
+    """加载 Milvus 知识库的图谱服务；类型不符按不存在处理。"""
+    kb_info = await knowledge_base.get_knowledge_base_info(kb_id)
+    if not kb_info:
+        raise HTTPException(status_code=404, detail="Knowledge base not found")
+
+    kb_type = kb_info.kb_type.lower()
+    if kb_type != "milvus":
+        raise HTTPException(status_code=404, detail="Graph API only supports Milvus knowledge bases")
+
+    return KnowledgeGraphService(kb_id=kb_id)

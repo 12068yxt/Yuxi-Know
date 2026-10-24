@@ -1,7 +1,5 @@
 """用户 Agent 定时任务 HTTP 适配层。"""
 
-from __future__ import annotations
-
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 from sqlalchemy.ext.asyncio import AsyncSession

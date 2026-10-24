@@ -1,4 +1,4 @@
-from __future__ import annotations
+"""智能体定义、后端与专属 Skill 路由。"""
 
 from typing import Literal
 
@@ -59,27 +59,6 @@ class AgentUpdate(BaseModel):
     pics: list[str] | None = None
     config_json: dict | None = None
     share_config: dict | None = None
-
-
-async def _serialize_agent(
-    db,
-    item,
-    user: User,
-    *,
-    include_configurable_items: bool = False,
-    backend_info_cache: dict[tuple[str, bool, str], dict] | None = None,
-) -> dict:
-    try:
-        data = await serialize_agent_definition(
-            db,
-            item,
-            user=user,
-            include_configurable_items=include_configurable_items,
-            backend_info_cache=backend_info_cache,
-        )
-    except AgentBackendNotFoundError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
-    return data
 
 
 @agent_router.get("/backends")
@@ -157,21 +136,6 @@ async def create_agent_with_skill(
     return await _create_agent_response(db, current_user, payload, skill_upload=(file.filename, file_bytes))
 
 
-async def _create_agent_response(db, user, payload, *, skill_upload=None):
-    """将同一创建用例的领域错误与结果映射到 HTTP。"""
-    try:
-        item = await create_agent_definition(db, operator=user, skill_upload=skill_upload, **payload.model_dump())
-    except AgentBackendNotFoundError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
-    except PermissionError as exc:
-        raise HTTPException(status_code=403, detail=str(exc)) from exc
-    except ValueError as exc:
-        # YAML parser 的后续行含文件片段；只展示失败原因，不回显内容。
-        detail = {"code": "agent_creation_invalid", "message": str(exc).splitlines()[0]}
-        raise HTTPException(status_code=422, detail=detail) from exc
-    return {"agent": await _serialize_agent(db, item, user, include_configurable_items=True)}
-
-
 @agent_router.get("/{agent_id}")
 async def get_agent(agent_id: str, current_user: User = Depends(get_required_user), db: AsyncSession = Depends(get_db)):
     agent_slug = agent_id  # 兼容既有路径参数名；这里实际是 Agent.slug。
@@ -188,6 +152,7 @@ async def update_agent(
     current_user: User = Depends(get_required_user),
     db: AsyncSession = Depends(get_db),
 ):
+    """更新可管理的智能体定义。"""
     agent_slug = agent_id  # 兼容既有路径参数名；这里实际是 Agent.slug。
     item = await get_visible_agent_definition(db, user=current_user, slug=agent_slug)
     if not item:
@@ -221,6 +186,7 @@ async def update_agent(
 
 @agent_router.delete("/{agent_id}")
 async def delete_agent(agent_id: str, current_user: User = Depends(get_required_user), db: AsyncSession = Depends(get_db)):
+    """删除自有非内置智能体。"""
     agent_slug = agent_id  # 兼容既有路径参数名；这里实际是 Agent.slug。
     item = await get_visible_agent_definition(db, user=current_user, slug=agent_slug)
     if not item:
@@ -246,6 +212,7 @@ async def set_agent_default(
     current_user: User = Depends(get_superadmin_user),
     db: AsyncSession = Depends(get_db),
 ):
+    """设置平台默认智能体（超级管理员）。"""
     agent_slug = agent_id  # 兼容既有路径参数名；这里实际是 Agent.slug。
     item = await get_agent_definition_by_slug(db, slug=agent_slug)
     if not item:
@@ -304,3 +271,40 @@ async def upload_self_skill(
         raise HTTPException(status_code=403, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+async def _serialize_agent(
+    db,
+    item,
+    user: User,
+    *,
+    include_configurable_items: bool = False,
+    backend_info_cache: dict[tuple[str, bool, str], dict] | None = None,
+) -> dict:
+    """序列化智能体定义，后端缺失时返回 404。"""
+    try:
+        data = await serialize_agent_definition(
+            db,
+            item,
+            user=user,
+            include_configurable_items=include_configurable_items,
+            backend_info_cache=backend_info_cache,
+        )
+    except AgentBackendNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return data
+
+
+async def _create_agent_response(db, user, payload, *, skill_upload=None):
+    """将同一创建用例的领域错误与结果映射到 HTTP。"""
+    try:
+        item = await create_agent_definition(db, operator=user, skill_upload=skill_upload, **payload.model_dump())
+    except AgentBackendNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    except ValueError as exc:
+        # YAML parser 的后续行含文件片段；只展示失败原因，不回显内容。
+        detail = {"code": "agent_creation_invalid", "message": str(exc).splitlines()[0]}
+        raise HTTPException(status_code=422, detail=detail) from exc
+    return {"agent": await _serialize_agent(db, item, user, include_configurable_items=True)}

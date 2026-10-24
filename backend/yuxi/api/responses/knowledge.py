@@ -1,7 +1,5 @@
 """将知识库内部读取模型转换为现有 HTTP 响应。"""
 
-from __future__ import annotations
-
 from typing import Any
 
 from yuxi.modules.identity.permissions import ResourcePermission
@@ -13,6 +11,7 @@ from yuxi.shared.datetime import utc_isoformat
 
 def serialize_staged_file(staged: StagedDocument, *, kb_id: str | None, filename: str, size: int) -> dict:
     """投影普通上传和工作区导入共用的既有文件字段。"""
+    upload_prefix = f"{kb_id or 'unknown'}/upload/"
     return {
         "file_path": staged.upload.url,
         "minio_path": staged.upload.url,
@@ -21,25 +20,9 @@ def serialize_staged_file(staged: StagedDocument, *, kb_id: str | None, filename
         "filename": filename,
         "original_filename": filename,
         "size": size,
-        "minio_filename": staged.upload.object_name[len(f"{kb_id or 'unknown'}/upload/") :],
+        "minio_filename": staged.upload.object_name[len(upload_prefix) :],
         "object_name": staged.upload.object_name,
         "bucket_name": staged.upload.bucket_name,
-    }
-
-
-def _knowledge_base_stats(knowledge_base: KnowledgeBaseSummary) -> dict:
-    """组装兼容现有接口的嵌套统计字段。"""
-    return {
-        "file_count": knowledge_base.file_count,
-        "folder_count": knowledge_base.folder_count,
-        "row_count": knowledge_base.row_count,
-        "total_size": knowledge_base.total_size,
-        "chunk_count": knowledge_base.chunk_count,
-        "token_count": knowledge_base.token_count,
-        "pending_parse_count": knowledge_base.pending_parse_count,
-        "pending_index_count": knowledge_base.pending_index_count,
-        "processing_count": knowledge_base.processing_count,
-        "file_status_counts": knowledge_base.file_status_counts,
     }
 
 
@@ -91,3 +74,19 @@ def serialize_knowledge_base(
 def serialize_knowledge_base_list(knowledge_bases: list[KnowledgeBaseSummary]) -> dict[str, list[dict[str, Any]]]:
     """转换知识库摘要列表为现有列表接口响应。"""
     return {"knowledge_bases": [serialize_knowledge_base(knowledge_base) for knowledge_base in knowledge_bases]}
+
+
+def _knowledge_base_stats(knowledge_base: KnowledgeBaseSummary) -> dict:
+    """组装兼容现有接口的嵌套统计字段。"""
+    return {
+        "file_count": knowledge_base.file_count,
+        "folder_count": knowledge_base.folder_count,
+        "row_count": knowledge_base.row_count,
+        "total_size": knowledge_base.total_size,
+        "chunk_count": knowledge_base.chunk_count,
+        "token_count": knowledge_base.token_count,
+        "pending_parse_count": knowledge_base.pending_parse_count,
+        "pending_index_count": knowledge_base.pending_index_count,
+        "processing_count": knowledge_base.processing_count,
+        "file_status_counts": knowledge_base.file_status_counts,
+    }

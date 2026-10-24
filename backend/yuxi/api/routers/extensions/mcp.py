@@ -26,9 +26,7 @@ mcp = APIRouter(prefix="/system/mcp-servers", tags=["mcp"])
 mcp.include_router(oauth_router)
 
 
-# =============================================================================
-# === DTOs ===
-# =============================================================================
+# --- DTOs ---
 
 
 class CreateMcpServerRequest(BaseModel):
@@ -65,30 +63,7 @@ class UpdateMcpServerStatusRequest(BaseModel):
     enabled: bool = Field(..., description="是否启用")
 
 
-# =============================================================================
-# === Helpers ===
-# =============================================================================
-
-
-async def get_server_or_404(db: AsyncSession, slug: str):
-    """Helper to get server or raise 404."""
-    server = await get_mcp_server(db, slug)
-    if not server:
-        raise HTTPException(status_code=404, detail=f"服务器 '{slug}' 不存在")
-    return server
-
-
-def serialize_mcp_server(server) -> dict:
-    """序列化 MCP，并补充代码内置标识。"""
-    data = server.to_dict()
-    data["can_manage"] = True
-    data["is_builtin"] = is_builtin_mcp_server(server)
-    return data
-
-
-# =============================================================================
-# === MCP 服务器 CRUD ===
-# =============================================================================
+# --- MCP 服务器 CRUD ---
 
 
 @mcp.get("")
@@ -101,21 +76,24 @@ async def get_mcp_servers(
         servers = await get_all_mcp_servers(db)
         states = await personal_connection_states(db, servers, current_user.id)
         if current_user.role == "superadmin":
-            return {"success": True, "data": [{**serialize_mcp_server(s), "connection_status": states[s.slug]} for s in servers]}
+            return {
+                "success": True,
+                "data": [{**serialize_mcp_server(server), "connection_status": states[server.slug]} for server in servers],
+            }
 
         data = []
-        for s in servers:
-            if not s.enabled:
+        for server in servers:
+            if not server.enabled:
                 continue
             data.append(
                 {
-                    "slug": s.slug,
-                    "auth_mode": s.auth_mode,
-                    "connection_status": states[s.slug],
+                    "slug": server.slug,
+                    "auth_mode": server.auth_mode,
+                    "connection_status": states[server.slug],
                     "can_manage": False,
-                    "name": getattr(s, "name", ""),
-                    "description": getattr(s, "description", None),
-                    "enabled": bool(getattr(s, "enabled", True)),
+                    "name": getattr(server, "name", ""),
+                    "description": getattr(server, "description", None),
+                    "enabled": bool(getattr(server, "enabled", True)),
                 }
             )
         return {"success": True, "data": data}
@@ -133,7 +111,6 @@ async def create_mcp_server_route(
     db: AsyncSession = Depends(get_db),
 ):
     """创建新的 MCP 服务器"""
-    # 校验传输类型
     valid_transports = ("sse", "streamable_http")
     if request.transport not in valid_transports:
         raise HTTPException(status_code=400, detail=f"传输类型必须是 {', '.join(valid_transports)} 之一")
@@ -193,7 +170,6 @@ async def update_mcp_server_route(
     db: AsyncSession = Depends(get_db),
 ):
     """更新 MCP 服务器配置"""
-    # 校验传输类型
     valid_transports = ("sse", "streamable_http")
     if request.transport is not None and request.transport not in valid_transports:
         raise HTTPException(status_code=400, detail=f"传输类型必须是 {', '.join(valid_transports)} 之一")
@@ -235,7 +211,6 @@ async def delete_mcp_server_route(
 ):
     """删除 MCP 服务器"""
     try:
-        # 检查是否为系统内置服务器
         server = await get_mcp_server(db, slug)
         if server and is_builtin_mcp_server(server):
             raise HTTPException(status_code=403, detail="系统内置的 MCP 服务器无法删除")
@@ -251,9 +226,7 @@ async def delete_mcp_server_route(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-# =============================================================================
-# === MCP 服务器操作 ===
-# =============================================================================
+# --- MCP 服务器操作 ---
 
 
 @mcp.post("/{slug}/test")
@@ -310,9 +283,7 @@ async def update_mcp_server_status_route(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-# =============================================================================
-# === MCP 工具管理 ===
-# =============================================================================
+# --- MCP 工具管理 ---
 
 
 @mcp.get("/{slug}/tools")
@@ -327,7 +298,7 @@ async def get_mcp_server_tools(
         disabled_tools = server.disabled_tools or []
 
         try:
-            # 获取所有工具（不过滤 disabled_tools）
+            # 全量工具列表，启用状态由 disabled_tools 在响应中标记
             tools = await get_all_mcp_tools(slug, uid=current_user.uid)
             tool_list = []
 
@@ -341,7 +312,7 @@ async def get_mcp_server_tools(
                     "description": getattr(tool, "description", ""),
                     "enabled": original_name not in disabled_tools,
                 }
-                # 提取参数信息
+                # 提取参数信息：从 args_schema 读取属性与必填项
                 if hasattr(tool, "args_schema") and tool.args_schema:
                     schema = tool.args_schema.schema() if hasattr(tool.args_schema, "schema") else {}
                     tool_info["parameters"] = schema.get("properties", {})
@@ -391,3 +362,19 @@ async def toggle_mcp_server_tool_route(
     except Exception as e:
         logger.error(f"Failed to toggle MCP server tool: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+async def get_server_or_404(db: AsyncSession, slug: str):
+    """按 slug 加载服务器，不存在时返回 404。"""
+    server = await get_mcp_server(db, slug)
+    if not server:
+        raise HTTPException(status_code=404, detail=f"服务器 '{slug}' 不存在")
+    return server
+
+
+def serialize_mcp_server(server) -> dict:
+    """序列化 MCP，并补充代码内置标识。"""
+    data = server.to_dict()
+    data["can_manage"] = True
+    data["is_builtin"] = is_builtin_mcp_server(server)
+    return data

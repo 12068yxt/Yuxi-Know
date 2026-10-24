@@ -1,7 +1,4 @@
-"""
-部门管理路由
-提供部门的增删改查接口，仅超级管理员可访问
-"""
+"""部门管理路由：提供部门的增删改查接口，仅管理员及以上可访问。"""
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field
@@ -12,13 +9,10 @@ from yuxi.modules.identity.models import User
 from yuxi.modules.identity.services import administration
 from yuxi.modules.identity.services.administration import IdentityConflictError, create_department_with_admin
 
-# 创建路由器
 department = APIRouter(prefix="/departments", tags=["department"])
 
 
-# =============================================================================
-# === 请求和响应模型 ===
-# =============================================================================
+# --- 请求和响应模型 ---
 
 
 class DepartmentCreate(BaseModel):
@@ -26,7 +20,6 @@ class DepartmentCreate(BaseModel):
 
     name: str
     description: str | None = None
-    # 必需的管理员信息
     admin_uid: str
     admin_password: str = Field(min_length=8)
     admin_phone: str | None = None
@@ -49,9 +42,7 @@ class DepartmentResponse(BaseModel):
     user_count: int = 0
 
 
-# =============================================================================
-# === 部门管理路由 ===
-# =============================================================================
+# --- 部门管理路由 ---
 
 
 @department.get("", response_model=list[DepartmentResponse])
@@ -67,10 +58,10 @@ async def get_department(
     db: AsyncSession = Depends(get_db),
 ):
     """获取指定部门详情"""
-    department = await administration.get_department_detail(db, department_id=department_id)
-    if department is None:
+    detail = await administration.get_department_detail(db, department_id=department_id)
+    if detail is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="部门不存在")
-    return department
+    return detail
 
 
 @department.post("", response_model=DepartmentResponse, status_code=status.HTTP_201_CREATED)
@@ -94,6 +85,7 @@ async def update_department(
     current_user: User = Depends(get_superadmin_user),
     db: AsyncSession = Depends(get_db),
 ):
+    """更新部门名称或描述。"""
     return await administration.update_department(db, department_id=department_id, **department_data.model_dump())
 
 
@@ -103,4 +95,5 @@ async def delete_department(
     current_user: User = Depends(get_superadmin_user),
     db: AsyncSession = Depends(get_db),
 ):
+    """删除部门及其成员归属。"""
     return await administration.delete_department(db, department_id=department_id)

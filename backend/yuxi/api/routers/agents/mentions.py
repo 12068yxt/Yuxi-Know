@@ -1,4 +1,4 @@
-from __future__ import annotations
+"""提及文件搜索路由。"""
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
@@ -28,9 +28,7 @@ async def search_mention_files(
     current_user: User = Depends(get_required_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """
-    提及文件模糊搜索接口：未创建 thread 时只搜索用户 workspace；已有 thread 时可搜索当前对话文件。
-    """
+    """提及文件模糊搜索：未创建 thread 时只搜索用户 workspace，已有 thread 时可搜索当前对话文件。"""
     try:
         return await search_mentions(
             thread_id=thread_id,

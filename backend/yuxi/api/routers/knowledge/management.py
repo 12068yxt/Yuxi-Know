@@ -1,3 +1,5 @@
+"""知识库管理、文档、查询与文件上传路由。"""
+
 import asyncio
 import os
 import textwrap
@@ -12,9 +14,7 @@ from starlette.responses import StreamingResponse
 
 from yuxi.api.dependencies.auth import get_admin_user, get_db, get_required_user
 from yuxi.api.dependencies.knowledge import (
-    ensure_knowledge_base_permission as _ensure_knowledge_base_permission,
-)
-from yuxi.api.dependencies.knowledge import (
+    ensure_knowledge_base_permission,
     require_knowledge_base_manage,
     require_knowledge_base_read,
 )
@@ -127,71 +127,10 @@ media_types = {
     ".h": "text/x-chdr",
     ".hpp": "text/x-c++hdr",
 }
+# 导出与下载响应使用的扩展名到 Content-Type 映射。
 
 
-async def _require_manage_permission_if_kb_id(kb_id: str | None, current_user: User) -> None:
-    """当请求携带 kb_id 时，校验当前用户对该知识库的管理权限。"""
-    if kb_id and getattr(current_user, "role", None):
-        await _ensure_knowledge_base_permission(kb_id, current_user, ResourcePermission.MANAGE)
-
-
-async def _ensure_knowledge_base_supports_documents(kb_id: str, operation: str) -> dict:
-    kb_info, supports_documents = await knowledge_base_manager.get_knowledge_base_document_support(kb_id)
-    if not kb_info:
-        raise HTTPException(status_code=404, detail=f"知识库 {kb_id} 不存在")
-    kb_type = kb_info.kb_type.lower()
-    if not supports_documents:
-        raise HTTPException(status_code=400, detail=f"{kb_info.name or kb_type} 只支持检索，不支持{operation}")
-    return kb_info
-
-
-def _ensure_document_params(params: dict | None) -> dict:
-    if params is None:
-        return {}
-    if not isinstance(params, dict):
-        raise HTTPException(status_code=400, detail="params must be an object")
-    try:
-        normalize_chunk_preset_id(params.get("chunk_preset_id"))
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    return params
-
-
-def _validate_uploaded_document_items(items: list[str], params: dict) -> None:
-    if not items:
-        raise HTTPException(status_code=400, detail="items must not be empty")
-
-    content_hashes = params.get("content_hashes")
-    if content_hashes is not None and not isinstance(content_hashes, dict):
-        raise HTTPException(status_code=400, detail="params.content_hashes must be an object")
-
-    file_sizes = params.get("file_sizes")
-    if file_sizes is not None and not isinstance(file_sizes, dict):
-        raise HTTPException(status_code=400, detail="params.file_sizes must be an object")
-
-    if "source_paths" in params and not isinstance(params["source_paths"], dict):
-        raise HTTPException(status_code=400, detail="params.source_paths must be an object")
-
-    preprocessed_map = params.get(PREPROCESSED_UPLOADS_KEY)
-    if preprocessed_map is not None and not isinstance(preprocessed_map, dict):
-        raise HTTPException(status_code=400, detail="params._preprocessed_map must be an object")
-
-    for item in items:
-        if not isinstance(item, str) or not item.strip():
-            raise HTTPException(status_code=400, detail="items must only contain non-empty strings")
-        if not is_minio_url(item):
-            raise HTTPException(status_code=400, detail="File source must be a MinIO URL")
-
-        has_content_hash = isinstance(content_hashes, dict) and bool(content_hashes.get(item))
-        preprocessed = preprocessed_map.get(item) if isinstance(preprocessed_map, dict) else None
-        has_preprocessed_hash = isinstance(preprocessed, dict) and bool(preprocessed.get("content_hash"))
-        if not has_content_hash and not has_preprocessed_hash:
-            raise HTTPException(status_code=400, detail=f"Missing content_hash for file: {item}")
-
-
-# =============================================================================
-# === 知识库管理分组 ===
-# =============================================================================
+# --- 知识库管理 ---
 
 
 @knowledge.get("/knowledge-bases")
@@ -345,6 +284,7 @@ async def delete_knowledge_base(kb_id: str, current_user: User = Depends(require
 
 @knowledge.get("/knowledge-bases/{kb_id}/graph-build/status")
 async def get_graph_build_status(kb_id: str, current_user: User = Depends(require_knowledge_base_read)):
+    """读取图谱构建任务状态。"""
     try:
         return await KnowledgeGraphService().get_status(kb_id, job_tracker=job_tracker)
     except ValueError as e:
@@ -362,6 +302,7 @@ async def configure_graph_build(
     data: dict = Body(...),
     current_user: User = Depends(require_knowledge_base_manage),
 ):
+    """保存图谱抽取配置；已锁定的配置返回 409。"""
     try:
         config = await KnowledgeGraphService().configure(
             kb_id,
@@ -385,6 +326,7 @@ async def index_graph_build(
     kb_id: str,
     current_user: User = Depends(require_knowledge_base_manage),
 ):
+    """提交图谱向量索引构建任务。"""
     try:
         job = await graph_build.start_graph_build(kb_id)
         return {"message": "图谱构建任务已提交", "status": "queued", "job_id": job.id}
@@ -403,6 +345,7 @@ async def get_graph_build_failed_chunks(
     limit: int = 10,
     current_user: User = Depends(require_knowledge_base_read),
 ):
+    """获取图谱抽取失败 Chunk 样例。"""
     try:
         return await KnowledgeGraphService().get_failed_chunk_samples(kb_id, limit=max(1, min(limit, 10)))
     except ValueError as e:
@@ -420,6 +363,7 @@ async def reset_graph_build(
     data: dict | None = Body(default=None),
     current_user: User = Depends(require_knowledge_base_manage),
 ):
+    """重置图谱构建状态，可选择性清空抽取结果或配置。"""
     data = data or {}
     try:
         return await graph_build.reset_graph_build(
@@ -442,6 +386,7 @@ async def reconcile_graph_build(
     data: dict | None = Body(default=None),
     current_user: User = Depends(require_knowledge_base_manage),
 ):
+    """提交失败 Chunk 的向量索引修复任务。"""
     data = data or {}
     mode = data.get("mode") or "failed"
     try:
@@ -489,9 +434,7 @@ async def export_knowledge_base(
         raise HTTPException(status_code=500, detail=f"导出知识库失败: {e}")
 
 
-# =============================================================================
-# === 知识库文档管理分组 ===
-# =============================================================================
+# --- 知识库文档管理分组 ---
 
 
 @knowledge.get("/knowledge-bases/{kb_id}/documents")
@@ -631,68 +574,6 @@ async def add_uploaded_documents(
     )
 
 
-def _validate_direct_document_action_file_ids(file_ids: list[str]) -> list[str]:
-    normalized_file_ids = [file_id for file_id in file_ids if file_id]
-    if not normalized_file_ids:
-        raise HTTPException(status_code=400, detail="请选择至少一个文件")
-    if len(normalized_file_ids) > MAX_DIRECT_DOCUMENT_ACTION_FILE_IDS:
-        raise HTTPException(
-            status_code=400,
-            detail=(f"单次最多支持 {MAX_DIRECT_DOCUMENT_ACTION_FILE_IDS} 个文件，请使用待处理状态入口提交全量后台作业"),
-        )
-    return normalized_file_ids
-
-
-async def _enqueue_document_action_job(
-    *,
-    kb_id: str,
-    file_ids: list[str],
-    params: dict,
-    operator_id: str,
-    kb_info: KnowledgeBaseDetail,
-    action: str,
-) -> dict:
-    """提交管理端指定文件的解析或入库任务。"""
-    params = _ensure_document_params(params)
-    try:
-        return await submit_document_action(
-            kb_id=kb_id,
-            file_ids=file_ids,
-            params=params,
-            operator_id=operator_id,
-            kb_info=kb_info,
-            action=action,
-        )
-    except HTTPException:
-        raise
-    except Exception as e:
-        return {"message": f"提交失败: {e}", "status": "failed"}
-
-
-async def _enqueue_pending_document_action_job(
-    *,
-    kb_id: str,
-    params: dict,
-    operator_id: str,
-    kb_info: KnowledgeBaseDetail,
-    action: str,
-) -> dict:
-    """提交管理端按状态全量解析或入库任务。"""
-    params = _ensure_document_params(params)
-    try:
-        return await submit_pending_document_action(
-            kb_id=kb_id,
-            params=params,
-            operator_id=operator_id,
-            kb_info=kb_info,
-            action=action,
-        )
-    except HTTPException:
-        raise
-    except Exception as e:
-        return {"message": f"提交失败: {e}", "status": "failed"}
-
-
 @knowledge.post("/knowledge-bases/{kb_id}/documents/parse")
 async def parse_documents(
     kb_id: str,
@@ -819,8 +700,7 @@ async def get_document_content(kb_id: str, doc_id: str, current_user: User = Dep
 
     try:
         info = await knowledge_base_manager.get_file_content(kb_id, doc_id)
-        internal_graph_fields = {"ent_id", "ent_ids", "extraction_result"}
-        info["lines"] = [{key: value for key, value in line.items() if key not in internal_graph_fields} for line in info.get("lines", [])]
+        info["lines"] = _strip_internal_graph_fields(info.get("lines", []))
         return info
     except HTTPException:
         raise
@@ -842,7 +722,6 @@ async def batch_delete_documents(kb_id: str, file_ids: list[str] = Body(...), cu
         try:
             file_meta_info = await knowledge_base_manager.get_file_basic_info(kb_id, doc_id)
 
-            # Check if it is a folder
             is_folder = file_meta_info.get("meta", {}).get("is_folder", False)
             if is_folder:
                 await knowledge_base_manager.delete_folder(kb_id, doc_id)
@@ -876,7 +755,6 @@ async def delete_document(kb_id: str, doc_id: str, current_user: User = Depends(
     try:
         file_meta_info = await knowledge_base_manager.get_file_basic_info(kb_id, doc_id)
 
-        # Check if it is a folder
         is_folder = file_meta_info.get("meta", {}).get("is_folder", False)
         if is_folder:
             await knowledge_base_manager.delete_folder(kb_id, doc_id)
@@ -945,24 +823,9 @@ async def download_document(kb_id: str, doc_id: str, current_user: User = Depend
             raise
         except Exception as e:
             logger.error(f"Failed to download MinIO file: {e}")
-            raise StorageError(f"下载文件失败: {e}")
+            raise StorageError(f"下载文件失败: {e}") from e
 
-        # 创建流式生成器
-        async def minio_stream():
-            try:
-                while True:
-                    chunk = await asyncio.to_thread(minio_response.read, 8192)
-                    if not chunk:
-                        break
-                    yield chunk
-            finally:
-                minio_response.close()
-                minio_response.release_conn()
-
-        response = StreamingResponse(
-            minio_stream(),
-            media_type=media_type,
-        )
+        response = _minio_streaming_response(minio_response, media_type=media_type)
         try:
             decoded_filename.encode("ascii")
             response.headers["Content-Disposition"] = f'attachment; filename="{decoded_filename}"'
@@ -982,9 +845,7 @@ async def download_document(kb_id: str, doc_id: str, current_user: User = Depend
 @knowledge.get("/knowledge-bases/{kb_id}/images/{object_path:path}")
 async def get_kb_image(kb_id: str, object_path: str, current_user: User = Depends(require_knowledge_base_read)):
     """经鉴权代理读取知识库图片（图片存放在私有 bucket，禁止匿名访问）"""
-    if not object_path.startswith("kb-images/"):
-        raise HTTPException(status_code=400, detail="非法的知识库图片路径")
-    if ".." in object_path or "\\" in object_path:
+    if not object_path.startswith("kb-images/") or ".." in object_path or "\\" in object_path:
         raise HTTPException(status_code=400, detail="非法的知识库图片路径")
 
     object_name = f"{kb_id}/{object_path}"
@@ -1001,24 +862,14 @@ async def get_kb_image(kb_id: str, object_path: str, current_user: User = Depend
         raise HTTPException(status_code=500, detail="读取图片失败")
 
     content_type = minio_response.getheader("Content-Type") or "application/octet-stream"
-
-    async def image_stream():
-        try:
-            while True:
-                chunk = await asyncio.to_thread(minio_response.read, 8192)
-                if not chunk:
-                    break
-                yield chunk
-        finally:
-            minio_response.close()
-            minio_response.release_conn()
-
-    return StreamingResponse(image_stream(), media_type=content_type, headers={"Cache-Control": "private, max-age=3600"})
+    return _minio_streaming_response(
+        minio_response,
+        media_type=content_type,
+        headers={"Cache-Control": "private, max-age=3600"},
+    )
 
 
-# =============================================================================
-# === 知识库查询分组 ===
-# =============================================================================
+# --- 知识库查询分组 ---
 
 
 @knowledge.post("/knowledge-bases/{kb_id}/query")
@@ -1096,9 +947,7 @@ async def get_knowledge_base_query_params(kb_id: str, current_user: User = Depen
         raise HTTPException(status_code=500, detail=str(e))
 
 
-# =============================================================================
-# === AI生成示例问题 ===
-# =============================================================================
+# --- AI生成示例问题 ---
 
 
 @knowledge.post("/knowledge-bases/{kb_id}/sample-questions")
@@ -1130,9 +979,7 @@ async def get_sample_questions(kb_id: str, current_user: User = Depends(require_
         raise HTTPException(status_code=500, detail=f"获取问题失败: {str(e)}")
 
 
-# =============================================================================
-# === 文件管理分组 ===
-# =============================================================================
+# --- 文件管理分组 ---
 
 
 @knowledge.post("/knowledge-bases/{kb_id}/folders")
@@ -1200,9 +1047,7 @@ async def fetch_url(
     kb_id: str | None = Body(None, embed=True),
     current_user: User = Depends(get_admin_user),
 ):
-    """
-    抓取 URL 内容并上传到 MinIO
-    """
+    """抓取 URL 内容并上传到 MinIO。"""
     logger.debug(f"Fetching URL: {url} for kb_id: {kb_id}")
     try:
         await _require_manage_permission_if_kb_id(kb_id, current_user)
@@ -1312,9 +1157,7 @@ async def get_supported_file_types(current_user: User = Depends(get_admin_user))
     return {"message": "success", "file_types": sorted(SUPPORTED_FILE_EXTENSIONS)}
 
 
-# =============================================================================
-# === 知识库类型分组 ===
-# =============================================================================
+# --- 知识库类型分组 ---
 
 
 @knowledge.get("/types")
@@ -1349,9 +1192,7 @@ async def get_knowledge_base_statistics(current_user: User = Depends(get_admin_u
         raise HTTPException(status_code=500, detail="获取知识库统计失败") from e
 
 
-# =============================================================================
-# === 知识库 AI 辅助功能分组 ===
-# =============================================================================
+# --- 知识库 AI 辅助功能分组 ---
 
 
 @knowledge.post("/generate-description")
@@ -1375,7 +1216,7 @@ async def generate_description(
     if file_list:
         # 限制文件数量，避免 prompt 过长
         display_files = file_list[:50]
-        files_str = "\n".join([f"- {f}" for f in display_files])
+        files_str = "\n".join(f"- {file_name}" for file_name in display_files)
         more_text = f"\n... (还有 {len(file_list) - 50} 个文件)" if len(file_list) > 50 else ""
         current_description += f"\n\n知识库包含的文件:\n{files_str}{more_text}"
 
@@ -1410,3 +1251,149 @@ async def generate_description(
     except Exception as e:
         logger.error(f"生成描述失败: {e}, {traceback.format_exc()}")
         raise HTTPException(status_code=500, detail=f"生成描述失败: {e}")
+
+
+def _minio_streaming_response(minio_response, *, media_type: str, headers: dict | None = None) -> StreamingResponse:
+    """把 MinIO 读取响应包装为流式 HTTP 响应，结束时归还连接。"""
+
+    async def stream():
+        try:
+            while True:
+                chunk = await asyncio.to_thread(minio_response.read, 8192)
+                if not chunk:
+                    break
+                yield chunk
+        finally:
+            minio_response.close()
+            minio_response.release_conn()
+
+    return StreamingResponse(stream(), media_type=media_type, headers=headers)
+
+
+def _strip_internal_graph_fields(lines: list[dict]) -> list[dict]:
+    """移除行数据中内嵌的图谱抽取内部字段。"""
+    internal_fields = {"ent_id", "ent_ids", "extraction_result"}
+    return [{key: value for key, value in line.items() if key not in internal_fields} for line in lines]
+
+
+async def _require_manage_permission_if_kb_id(kb_id: str | None, current_user: User) -> None:
+    """当请求携带 kb_id 时，校验当前用户对该知识库的管理权限。"""
+    if kb_id and getattr(current_user, "role", None):
+        await ensure_knowledge_base_permission(kb_id, current_user, ResourcePermission.MANAGE)
+
+
+async def _ensure_knowledge_base_supports_documents(kb_id: str, operation: str) -> dict:
+    kb_info, supports_documents = await knowledge_base_manager.get_knowledge_base_document_support(kb_id)
+    if not kb_info:
+        raise HTTPException(status_code=404, detail=f"知识库 {kb_id} 不存在")
+    kb_type = kb_info.kb_type.lower()
+    if not supports_documents:
+        raise HTTPException(status_code=400, detail=f"{kb_info.name or kb_type} 只支持检索，不支持{operation}")
+    return kb_info
+
+
+def _ensure_document_params(params: dict | None) -> dict:
+    if params is None:
+        return {}
+    if not isinstance(params, dict):
+        raise HTTPException(status_code=400, detail="params must be an object")
+    try:
+        normalize_chunk_preset_id(params.get("chunk_preset_id"))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return params
+
+
+def _validate_uploaded_document_items(items: list[str], params: dict) -> None:
+    if not items:
+        raise HTTPException(status_code=400, detail="items must not be empty")
+
+    content_hashes = params.get("content_hashes")
+    if content_hashes is not None and not isinstance(content_hashes, dict):
+        raise HTTPException(status_code=400, detail="params.content_hashes must be an object")
+
+    file_sizes = params.get("file_sizes")
+    if file_sizes is not None and not isinstance(file_sizes, dict):
+        raise HTTPException(status_code=400, detail="params.file_sizes must be an object")
+
+    if "source_paths" in params and not isinstance(params["source_paths"], dict):
+        raise HTTPException(status_code=400, detail="params.source_paths must be an object")
+
+    preprocessed_map = params.get(PREPROCESSED_UPLOADS_KEY)
+    if preprocessed_map is not None and not isinstance(preprocessed_map, dict):
+        raise HTTPException(status_code=400, detail="params._preprocessed_map must be an object")
+
+    for item in items:
+        if not isinstance(item, str) or not item.strip():
+            raise HTTPException(status_code=400, detail="items must only contain non-empty strings")
+        if not is_minio_url(item):
+            raise HTTPException(status_code=400, detail="File source must be a MinIO URL")
+
+        has_content_hash = isinstance(content_hashes, dict) and bool(content_hashes.get(item))
+        preprocessed = preprocessed_map.get(item) if isinstance(preprocessed_map, dict) else None
+        has_preprocessed_hash = isinstance(preprocessed, dict) and bool(preprocessed.get("content_hash"))
+        if not has_content_hash and not has_preprocessed_hash:
+            raise HTTPException(status_code=400, detail=f"Missing content_hash for file: {item}")
+
+
+def _validate_direct_document_action_file_ids(file_ids: list[str]) -> list[str]:
+    """校验直接提交的文件 ID 数量与内容，返回去空后的列表。"""
+    normalized_file_ids = [file_id for file_id in file_ids if file_id]
+    if not normalized_file_ids:
+        raise HTTPException(status_code=400, detail="请选择至少一个文件")
+    if len(normalized_file_ids) > MAX_DIRECT_DOCUMENT_ACTION_FILE_IDS:
+        raise HTTPException(
+            status_code=400,
+            detail=(f"单次最多支持 {MAX_DIRECT_DOCUMENT_ACTION_FILE_IDS} 个文件，请使用待处理状态入口提交全量后台作业"),
+        )
+    return normalized_file_ids
+
+
+async def _enqueue_document_action_job(
+    *,
+    kb_id: str,
+    file_ids: list[str],
+    params: dict,
+    operator_id: str,
+    kb_info: KnowledgeBaseDetail,
+    action: str,
+) -> dict:
+    """提交管理端指定文件的解析或入库任务。"""
+    params = _ensure_document_params(params)
+    try:
+        return await submit_document_action(
+            kb_id=kb_id,
+            file_ids=file_ids,
+            params=params,
+            operator_id=operator_id,
+            kb_info=kb_info,
+            action=action,
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        return {"message": f"提交失败: {e}", "status": "failed"}
+
+
+async def _enqueue_pending_document_action_job(
+    *,
+    kb_id: str,
+    params: dict,
+    operator_id: str,
+    kb_info: KnowledgeBaseDetail,
+    action: str,
+) -> dict:
+    """提交管理端按状态全量解析或入库任务。"""
+    params = _ensure_document_params(params)
+    try:
+        return await submit_pending_document_action(
+            kb_id=kb_id,
+            params=params,
+            operator_id=operator_id,
+            kb_info=kb_info,
+            action=action,
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        return {"message": f"提交失败: {e}", "status": "failed"}

@@ -55,10 +55,10 @@ async def list_providers(
     """获取独立模型供应商配置列表。"""
     providers = await get_all_model_providers(db)
     data = []
-    for p in providers:
-        d = p.to_dict()
-        d["credential_status"] = check_credential_status(p)
-        data.append(d)
+    for provider in providers:
+        provider_data = provider.to_dict()
+        provider_data["credential_status"] = check_credential_status(provider)
+        data.append(provider_data)
     return {"success": True, "data": data}
 
 
@@ -78,13 +78,13 @@ async def create_provider(
         await db.commit()
         await _refresh_model_cache()
         return {"success": True, "data": provider.to_dict()}
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
     except HTTPException:
         raise
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
     except Exception as e:
         logger.error(f"创建模型供应商失败: {e}")
-        raise HTTPException(status_code=500, detail="创建模型供应商失败")
+        raise HTTPException(status_code=500, detail="创建模型供应商失败") from e
 
 
 @model_providers.post("/models/cache/refresh")
@@ -176,7 +176,7 @@ async def update_provider(
     """更新独立模型供应商配置。"""
     try:
         # 获取用户显式设置过的字段（即使值为 None），以便正确处理清空操作
-        unset_fields = payload.model_fields_set
+        set_fields = payload.model_fields_set
         data = payload.model_dump(exclude_none=True)
         for nullable_field in (
             "api_key_env",
@@ -188,7 +188,7 @@ async def update_provider(
             "embedding_models_endpoint",
             "rerank_models_endpoint",
         ):
-            if nullable_field in unset_fields and getattr(payload, nullable_field) is None:
+            if nullable_field in set_fields and getattr(payload, nullable_field) is None:
                 data[nullable_field] = None
         provider = await update_provider_config(db, provider_id, data, current_user.username)
         if provider is None:
@@ -199,10 +199,10 @@ async def update_provider(
     except HTTPException:
         raise
     except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        raise HTTPException(status_code=400, detail=str(e)) from e
     except Exception as e:
         logger.error(f"更新模型供应商失败 {provider_id}: {e}")
-        raise HTTPException(status_code=500, detail="更新模型供应商失败")
+        raise HTTPException(status_code=500, detail="更新模型供应商失败") from e
 
 
 @model_providers.delete("/{provider_id}")
@@ -234,16 +234,15 @@ async def get_remote_models(
         models = await fetch_remote_models(provider)
         return {"success": True, "data": models}
     except httpx.HTTPStatusError as e:
-        # 远程 API 返回的错误，不透传状态码避免前端误判为系统认证失败
-        detail = e.response.text
+        # 远端 401 归一为 502，避免前端把远端凭据问题误判为系统认证失败。
         if e.response.status_code == 401:
-            raise HTTPException(status_code=502, detail="远端 API 认证失败，请检查 API Key 配置")
-        raise HTTPException(status_code=e.response.status_code, detail=f"Models 请求失败: {detail}")
+            raise HTTPException(status_code=502, detail="远端 API 认证失败，请检查 API Key 配置") from e
+        raise HTTPException(status_code=e.response.status_code, detail=f"Models 请求失败: {e.response.text}") from e
     except HTTPException:
         raise
     except Exception as e:
         logger.error(f"拉取远端模型失败 {provider_id}: {e}")
-        raise HTTPException(status_code=400, detail=f"拉取远端模型失败: {e}")
+        raise HTTPException(status_code=400, detail=f"拉取远端模型失败: {e}") from e
 
 
 async def _refresh_model_cache() -> None:

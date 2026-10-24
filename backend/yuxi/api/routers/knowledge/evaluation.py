@@ -1,3 +1,5 @@
+"""知识库评估数据集与运行路由。"""
+
 from typing import Any, Literal
 from urllib.parse import quote
 
@@ -42,15 +44,6 @@ class RunEvaluationRequest(BaseModel):
     dataset_id: str = Field(..., min_length=1)
     name: str | None = Field(default=None, min_length=1, max_length=100)
     retrieval_config: dict[str, Any] = Field(default_factory=dict, alias="model_config")
-
-
-async def _get_evaluation_dataset_or_raise(dataset_id: str) -> Any:
-    """加载评估数据集，不存在时返回统一的 404。"""
-
-    dataset = await EvaluationService().get_dataset(dataset_id)
-    if dataset is None:
-        raise HTTPException(status_code=404, detail="评估数据集不存在")
-    return dataset
 
 
 async def require_evaluation_dataset_read(
@@ -132,10 +125,7 @@ async def get_evaluation_dataset(
 ):
     """获取评估数据集详情"""
     try:
-        if page < 1:
-            raise HTTPException(status_code=400, detail="页码必须大于0")
-        if page_size < 1 or page_size > 100:
-            raise HTTPException(status_code=400, detail="每页大小必须在1-100之间")
+        _validate_pagination(page, page_size)
 
         service = EvaluationService()
         dataset = await service.get_dataset_detail(kb_id, dataset_id, page, page_size)
@@ -143,9 +133,7 @@ async def get_evaluation_dataset(
     except HTTPException:
         raise
     except ValueError as e:
-        if "not found" in str(e).lower():
-            raise HTTPException(status_code=404, detail=str(e))
-        raise HTTPException(status_code=400, detail=str(e))
+        _raise_from_value_error(e)
     except Exception as e:
         logger.exception(f"获取评估数据集详情失败: {e}")
         raise HTTPException(status_code=500, detail=f"获取评估数据集详情失败: {str(e)}")
@@ -167,9 +155,7 @@ async def download_evaluation_dataset(
             headers={"Content-Disposition": f"attachment; filename*=UTF-8''{quote(filename)}"},
         )
     except ValueError as e:
-        if "not found" in str(e).lower():
-            raise HTTPException(status_code=404, detail=str(e))
-        raise HTTPException(status_code=400, detail=str(e))
+        _raise_from_value_error(e)
     except HTTPException:
         raise
     except Exception as e:
@@ -188,9 +174,7 @@ async def delete_evaluation_dataset(
         await service.delete_dataset(dataset_id)
         return {"message": "success", "data": None}
     except ValueError as e:
-        if "not found" in str(e).lower():
-            raise HTTPException(status_code=404, detail=str(e))
-        raise HTTPException(status_code=400, detail=str(e))
+        _raise_from_value_error(e)
     except HTTPException:
         raise
     except Exception as e:
@@ -267,9 +251,7 @@ async def run_evaluation(
         )
         return {"message": "success", "data": {"run_id": run_id}}
     except ValueError as e:
-        if "not found" in str(e).lower():
-            raise HTTPException(status_code=404, detail=str(e))
-        raise HTTPException(status_code=400, detail=str(e))
+        _raise_from_value_error(e)
     except HTTPException:
         raise
     except Exception as e:
@@ -305,10 +287,7 @@ async def get_evaluation_run_results(
 ):
     """获取评估运行结果"""
     try:
-        if page < 1:
-            raise HTTPException(status_code=400, detail="页码必须大于0")
-        if page_size < 1 or page_size > 100:
-            raise HTTPException(status_code=400, detail="每页大小必须在1-100之间")
+        _validate_pagination(page, page_size)
 
         if result_filter not in {None, "all", "answer_errors", "errors_or_low_recall"}:
             raise HTTPException(status_code=400, detail="无效的评估结果筛选条件")
@@ -319,9 +298,7 @@ async def get_evaluation_run_results(
     except HTTPException:
         raise
     except ValueError as e:
-        if "not found" in str(e).lower():
-            raise HTTPException(status_code=404, detail=str(e))
-        raise HTTPException(status_code=400, detail=str(e))
+        _raise_from_value_error(e)
     except Exception as e:
         logger.exception(f"获取评估运行结果失败: {e}")
         raise HTTPException(status_code=500, detail=f"获取评估运行结果失败: {str(e)}")
@@ -339,11 +316,33 @@ async def delete_evaluation_run(
         await service.delete_run(kb_id, run_id)
         return {"message": "success", "data": None}
     except ValueError as e:
-        if "not found" in str(e).lower():
-            raise HTTPException(status_code=404, detail=str(e))
-        raise HTTPException(status_code=400, detail=str(e))
+        _raise_from_value_error(e)
     except HTTPException:
         raise
     except Exception as e:
         logger.exception(f"删除评估运行失败: {e}")
         raise HTTPException(status_code=500, detail=f"删除评估运行失败: {str(e)}")
+
+
+def _raise_from_value_error(error: ValueError) -> None:
+    """把数据集服务的 ValueError 映射为统一的 404/400。"""
+    if "not found" in str(error).lower():
+        raise HTTPException(status_code=404, detail=str(error)) from error
+    raise HTTPException(status_code=400, detail=str(error)) from error
+
+
+def _validate_pagination(page: int, page_size: int) -> None:
+    """校验评估结果的分页参数。"""
+    if page < 1:
+        raise HTTPException(status_code=400, detail="页码必须大于0")
+    if page_size < 1 or page_size > 100:
+        raise HTTPException(status_code=400, detail="每页大小必须在1-100之间")
+
+
+async def _get_evaluation_dataset_or_raise(dataset_id: str) -> Any:
+    """加载评估数据集，不存在时返回统一的 404。"""
+
+    dataset = await EvaluationService().get_dataset(dataset_id)
+    if dataset is None:
+        raise HTTPException(status_code=404, detail="评估数据集不存在")
+    return dataset

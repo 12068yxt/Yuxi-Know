@@ -1,7 +1,5 @@
 """知识域 Dashboard HTTP 路由。"""
 
-import traceback
-
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
@@ -35,6 +33,5 @@ async def read_knowledge_stats(
     except HTTPException:
         raise
     except Exception as exc:
-        logger.error(f"Error getting knowledge stats: {exc}")
-        logger.error(traceback.format_exc())
+        logger.exception("Error getting knowledge stats")
         raise HTTPException(status_code=500, detail=f"Failed to get knowledge stats: {str(exc)}") from exc
