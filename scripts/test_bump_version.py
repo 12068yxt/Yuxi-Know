@@ -18,6 +18,9 @@ class BumpVersionScriptTests(unittest.TestCase):
             "backend/pyproject.toml": 'version = "0.7.2.beta1"\n',
             "backend/uv.lock": ('name = "yuxi"\nversion = "0.7.2b1"\n'),
             "frontend/package.json": '{\n  "version": "0.7.2.beta1"\n}\n',
+            "backend/yuxi/sandbox_runner/settings.py": 'image = "yuxi-sandbox:0.7.2.beta1"\n',
+            "backend/test/integration/sandbox/test_container_sandbox.py": 'image = "yuxi-sandbox:0.7.2.beta1"\n' * 3,
+            "docs/advanced/container-sandbox.md": 'docker build -t yuxi-sandbox:0.7.2.beta1 .\n' * 2,
             "backend/test/e2e/web-tools.compose.yml": "image: ${COMPOSE_PROJECT_NAME:-yuxi}-api:${YUXI_VERSION:-0.7.2.beta1}\n",
             "docker-compose.yml": "\n".join(
                 f"image: ${{COMPOSE_PROJECT_NAME:-yuxi}}-{name}:${{YUXI_VERSION:-0.7.2.beta1}}"
@@ -79,6 +82,9 @@ class BumpVersionScriptTests(unittest.TestCase):
             current_paths = [
                 "backend/pyproject.toml",
                 "frontend/package.json",
+                "backend/yuxi/sandbox_runner/settings.py",
+                "backend/test/integration/sandbox/test_container_sandbox.py",
+                "docs/advanced/container-sandbox.md",
                 "backend/test/e2e/web-tools.compose.yml",
                 "docker-compose.yml",
                 "docker-compose.prod.yml",
@@ -121,10 +127,17 @@ class BumpVersionScriptTests(unittest.TestCase):
                 (root / "backend/pyproject.toml").read_text(),
             )
             for relative_path in (
+                "backend/yuxi/sandbox_runner/settings.py",
+                "backend/test/integration/sandbox/test_container_sandbox.py",
+            ):
+                self.assertIn("yuxi-sandbox:0.7.2.dev2", (root / relative_path).read_text())
+                self.assertNotIn("0.7.2.beta1", (root / relative_path).read_text())
+            for relative_path in (
                 "README.md",
                 "README.en.md",
                 "docs/intro/quick-start.md",
                 "docs/advanced/deployment.md",
+                "docs/advanced/container-sandbox.md",
                 "docs/.vitepress/theme/components/YuxiHome.vue",
                 "docs/develop-guides/releases/0.7.2.md",
                 "docs/develop-guides/changelog.md",

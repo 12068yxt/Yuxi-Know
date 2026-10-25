@@ -102,12 +102,14 @@ echo "  - frontend/package.json"
 echo "  - docker-compose.yml"
 echo "  - docker-compose.prod.yml"
 echo "  - backend/test/e2e/web-tools.compose.yml"
+echo "  - sandbox runner 与集成测试的默认镜像"
 echo "  - backend/uv.lock"
 if [ "$DEV_MODE" = false ]; then
     echo "  - README.md"
     echo "  - README.en.md"
     echo "  - docs/intro/quick-start.md"
     echo "  - docs/advanced/deployment.md"
+    echo "  - docs/advanced/container-sandbox.md"
     echo "  - docs/.vitepress/theme/components/YuxiHome.vue"
     echo "  - 当前候选更新说明与 changelog 候选入口"
 fi
@@ -148,6 +150,12 @@ echo "→ 更新网络工具 E2E 镜像版本"
 perl -pi -e "s/\\\$\\{YUXI_VERSION:-[^}]+\\}/\\\${YUXI_VERSION:-${NEW_VERSION}}/g" \
     "${PROJECT_ROOT}/backend/test/e2e/web-tools.compose.yml"
 
+echo "→ 更新 sandbox runner 与集成测试的默认镜像"
+for sandbox_source in backend/yuxi/sandbox_runner/settings.py backend/test/integration/sandbox/test_container_sandbox.py; do
+    perl -pi -e "s/(yuxi-sandbox:)[0-9]+\\.[0-9]+\\.[0-9]+(\\.[a-zA-Z0-9]+)?/\${1}${NEW_VERSION}/g" \
+        "${PROJECT_ROOT}/${sandbox_source}"
+done
+
 # -----------------------------------------------------------------------------
 # 5. 更新 uv.lock 中的项目版本号
 # -----------------------------------------------------------------------------
@@ -178,6 +186,10 @@ if [ "$DEV_MODE" = false ]; then
     echo "→ 更新 docs/advanced/deployment.md"
     perl -pi -e "s/(升级到当前 \`v)[0-9]+\\.[0-9]+\\.[0-9]+(\\.[a-zA-Z0-9]+)?/\${1}${NEW_VERSION}/g; s/(git checkout v)[0-9]+\\.[0-9]+\\.[0-9]+(\\.[a-zA-Z0-9]+)?/\${1}${NEW_VERSION}/g" \
         "${PROJECT_ROOT}/docs/advanced/deployment.md"
+
+    echo "→ 更新 docs/advanced/container-sandbox.md"
+    perl -pi -e "s/(yuxi-sandbox:)[0-9]+\\.[0-9]+\\.[0-9]+(\\.[a-zA-Z0-9]+)?/\${1}${NEW_VERSION}/g" \
+        "${PROJECT_ROOT}/docs/advanced/container-sandbox.md"
 
     echo "→ 更新 docs/.vitepress/theme/components/YuxiHome.vue"
     perl -pi -e "s/(git clone --branch v)[0-9]+\\.[0-9]+\\.[0-9]+(\\.[a-zA-Z0-9]+)?/\${1}${NEW_VERSION}/g" \

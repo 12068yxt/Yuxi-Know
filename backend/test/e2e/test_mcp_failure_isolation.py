@@ -51,7 +51,7 @@ async def test_unavailable_mcp_preserves_chat_and_reports_reason(e2e_client, e2e
             names = {item["function"]["name"] for item in body.get("tools", [])}
             assert "query_my_attendance" not in names
             if via_skill:
-                assert "list_kbs" not in names
+                assert "ocr_parse_file" not in names
             observed.append(system)
             common = {"id": "mcp-failure", "object": "chat.completion.chunk", "created": 1, "model": "deterministic-chat"}
             send_openai_sse_response(
@@ -123,7 +123,7 @@ async def test_unavailable_mcp_preserves_chat_and_reports_reason(e2e_client, e2e
                     archive.writestr(
                         "SKILL.md",
                         "---\nslug: mcp-fixture\nname: MCP fixture\ndescription: MCP failure fixture\n"
-                        f"mcp_dependencies: [{slug}]\ntool_dependencies: [list_kbs]\n---\n查询 MCP。\n",
+                        f"mcp_dependencies: [{slug}]\ntool_dependencies: [ocr_parse_file]\n---\n查询 MCP。\n",
                     )
                 response = await client.post(
                     "/api/agent/with-skill",

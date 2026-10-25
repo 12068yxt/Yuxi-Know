@@ -96,9 +96,10 @@ async def test_recovery_republishes_committed_pending_run(monkeypatch) -> None:
 
         sent = []
 
-        async def record_delivery(candidate):
+        async def record_delivery(candidate) -> bool:
             """记录补偿将要投递的持久 Run ID。"""
             sent.append(candidate.run_id)
+            return True
 
         monkeypatch.setattr(scheduler.pg_manager, "get_async_session_context", test_session)
         monkeypatch.setattr(scheduler, "deliver", record_delivery)
