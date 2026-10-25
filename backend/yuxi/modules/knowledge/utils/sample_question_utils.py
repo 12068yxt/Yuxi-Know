@@ -37,50 +37,8 @@ SAMPLE_QUESTIONS_SYSTEM_PROMPT = """你是一个专业的知识库问答测试�
 """
 
 
-def build_sample_question_file_list(files: dict[str, dict[str, Any]]) -> list[dict[str, str]]:
-    return [
-        {
-            "filename": file_info.get("filename", ""),
-            "type": file_info.get("type") or file_info.get("file_type", ""),
-        }
-        for file_info in files.values()
-    ]
-
-
-def build_sample_questions_user_message(name: str, files_info: list[dict[str, str]], count: int) -> str:
-    files_text = "\n".join([f"- {file_info['filename']} ({file_info['type']})" for file_info in files_info[:20]])
-    file_count_text = f"（共{len(files_info)}个文件）" if len(files_info) > 20 else ""
-
-    return textwrap.dedent(f"""请为知识库\"{name}\"生成{count}个测试问题。
-
-        知识库文件列表{file_count_text}：
-        {files_text}
-
-        请根据这些文件的名称和类型，生成{count}个有价值的测试问题。""")
-
-
-def parse_sample_questions_content(content: str) -> list[str]:
-    if "```json" in content:
-        json_start = content.find("```json") + 7
-        json_end = content.find("```", json_start)
-        if json_end == -1:
-            raise ValueError("AI返回的JSON代码块不完整")
-        content = content[json_start:json_end].strip()
-    elif "```" in content:
-        json_start = content.find("```") + 3
-        json_end = content.find("```", json_start)
-        if json_end == -1:
-            raise ValueError("AI返回的代码块不完整")
-        content = content[json_start:json_end].strip()
-
-    questions_data = json.loads(content)
-    questions = questions_data.get("questions", []) if isinstance(questions_data, dict) else []
-    if not questions or not isinstance(questions, list):
-        raise ValueError("AI返回的问题格式不正确")
-    return questions
-
-
 async def generate_knowledge_base_sample_questions(kb_id: str, count: int = 10) -> dict[str, Any]:
+    """按知识库文件清单生成示例问题并保存。"""
     kb_info = await knowledge_base.get_knowledge_base_info(kb_id, include_files=True)
     if not kb_info:
         raise ResourceNotFoundError(f"知识库 {kb_id} 不存在")
@@ -128,6 +86,7 @@ async def generate_knowledge_base_sample_questions(kb_id: str, count: int = 10) 
 
 
 async def get_knowledge_base_sample_questions(kb_id: str) -> dict[str, Any]:
+    """读取知识库已保存的示例问题。"""
     kb = await KnowledgeBaseRepository().get_by_kb_id(kb_id)
     if kb is None:
         raise ResourceNotFoundError(f"知识库 {kb_id} 不存在")
@@ -139,3 +98,49 @@ async def get_knowledge_base_sample_questions(kb_id: str) -> dict[str, Any]:
         "count": len(questions),
         "kb_id": kb_id,
     }
+
+
+def build_sample_question_file_list(files: dict[str, dict[str, Any]]) -> list[dict[str, str]]:
+    """把文件映射收敛为文件名/类型清单。"""
+    return [
+        {
+            "filename": file_info.get("filename", ""),
+            "type": file_info.get("type") or file_info.get("file_type", ""),
+        }
+        for file_info in files.values()
+    ]
+
+
+def build_sample_questions_user_message(name: str, files_info: list[dict[str, str]], count: int) -> str:
+    """构造携带文件列表（最多展示 20 条）的生成请求消息。"""
+    files_text = "\n".join([f"- {file_info['filename']} ({file_info['type']})" for file_info in files_info[:20]])
+    file_count_text = f"（共{len(files_info)}个文件）" if len(files_info) > 20 else ""
+
+    return textwrap.dedent(f"""请为知识库\"{name}\"生成{count}个测试问题。
+
+        知识库文件列表{file_count_text}：
+        {files_text}
+
+        请根据这些文件的名称和类型，生成{count}个有价值的测试问题。""")
+
+
+def parse_sample_questions_content(content: str) -> list[str]:
+    """解析模型返回内容（可带代码围栏）中的问题列表。"""
+    if "```json" in content:
+        json_start = content.find("```json") + 7
+        json_end = content.find("```", json_start)
+        if json_end == -1:
+            raise ValueError("AI返回的JSON代码块不完整")
+        content = content[json_start:json_end].strip()
+    elif "```" in content:
+        json_start = content.find("```") + 3
+        json_end = content.find("```", json_start)
+        if json_end == -1:
+            raise ValueError("AI返回的代码块不完整")
+        content = content[json_start:json_end].strip()
+
+    questions_data = json.loads(content)
+    questions = questions_data.get("questions", []) if isinstance(questions_data, dict) else []
+    if not questions or not isinstance(questions, list):
+        raise ValueError("AI返回的问题格式不正确")
+    return questions

@@ -9,6 +9,9 @@ from yuxi.modules.knowledge.implementations.read_only_connectors import ReadOnly
 from yuxi.modules.knowledge.read_models import KnowledgeBaseConfig
 from yuxi.shared.errors import UpstreamError
 
+FEISHU_DEFAULT_TOP_K = 10
+FEISHU_MAX_TOP_K = 50
+
 
 class FeishuKB(ReadOnlyConnectors):
     """使用管理员配置的用户凭证访问指定飞书知识空间。"""
@@ -60,7 +63,16 @@ class FeishuKB(ReadOnlyConnectors):
         del kb_id, kwargs
         return {
             "type": self.kb_type,
-            "options": [{"key": "final_top_k", "label": "最多返回文档数", "type": "number", "default": 10, "min": 1, "max": 50}],
+            "options": [
+                {
+                    "key": "final_top_k",
+                    "label": "最多返回文档数",
+                    "type": "number",
+                    "default": FEISHU_DEFAULT_TOP_K,
+                    "min": 1,
+                    "max": FEISHU_MAX_TOP_K,
+                }
+            ],
         }
 
     async def aquery(
@@ -79,7 +91,7 @@ class FeishuKB(ReadOnlyConnectors):
             raise ValueError("飞书搜索关键词长度须为 1 到 50 个字符")
         params = self.validate_additional_params(config.additional_params)
         options = {**config.query_options, **kwargs}
-        top_k = min(max(int(options.get("final_top_k", 10)), 1), 50)
+        top_k = min(max(int(options.get("final_top_k", FEISHU_DEFAULT_TOP_K)), 1), FEISHU_MAX_TOP_K)
         file_name = str(options.get("file_name") or "").casefold()
         results = []
         page_token = None

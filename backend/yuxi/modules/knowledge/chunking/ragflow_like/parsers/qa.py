@@ -1,388 +1,28 @@
+"""问答（QA）分块：从行首前缀、标题、表格与分隔符结构提取问答对，渲染为统一 QA 文本并做超长保护。"""
+
 from __future__ import annotations
 
 import csv
 import re
+from collections.abc import Callable
 from typing import Any
 
 from yuxi.modules.knowledge.chunking.source_spans import LocatedText, SourceSpanLocator, SourceText, join_source_text
 
-
-def _rm_prefix(text: str) -> str:
-    cleaned = (text or "").strip()
-    match = re.match(
-        r"^(问题|答案|回答|user|assistant|Q|A|Question|Answer|问|答)[\t:： ]+",
-        cleaned,
-        flags=re.IGNORECASE,
-    )
-    return cleaned[match.end() :] if match else cleaned
-
-
-def _to_qa_chunk(question: str, answer: str, eng: bool = False) -> str:
-    qprefix = "Question: " if eng else "问题："
-    aprefix = "Answer: " if eng else "回答："
-    content = join_source_text([qprefix + _rm_prefix(question), aprefix + _rm_prefix(answer)], "\t")
-    return LocatedText(str(content), question.source_range) if isinstance(question, LocatedText) else content
-
-
-def _guess_delimiter(lines: list[str]) -> str:
-    comma = 0
-    tab = 0
-    for line in lines:
-        if len(line.split(",")) == 2:
-            comma += 1
-        if len(line.split("\t")) == 2:
-            tab += 1
-    return "\t" if tab >= comma else ","
-
-
-def _extract_pairs_with_delimiter(lines: list[str], delimiter: str) -> list[tuple[str, str]]:
-    pairs: list[tuple[str, str]] = []
-    question = ""
-    answer = ""
-
-    for line in lines:
-        arr = line.split(delimiter)
-        if len(arr) != 2:
-            if question:
-                answer += "\n" + line
-            continue
-
-        if question and answer:
-            pairs.append((question, answer))
-        question, answer = arr
-
-    if question:
-        pairs.append((question, answer))
-
-    return [(q.strip(), a.strip()) for q, a in pairs if q.strip()]
-
-
-def _extract_pairs_from_csv(lines: list[str], delimiter: str) -> list[tuple[str, str]]:
-    pairs: list[tuple[str, str]] = []
-    question = ""
-    answer = ""
-
-    reader = csv.reader(lines, delimiter=delimiter)
-    first_line = 0
-    for row in reader:
-        record_start = first_line
-        raw_line = join_source_text(lines[first_line : reader.line_num], "\n")
-        first_line = reader.line_num
-        if len(row) != 2:
-            if question:
-                answer += "\n" + raw_line
-                if isinstance(question, LocatedText):
-                    question.source_range = (question.source_range[0], lines[reader.line_num - 1].source_range[1])
-            continue
-
-        if question and answer:
-            pairs.append((question, answer))
-        if isinstance(raw_line, SourceText):
-            # CSV 解码删除结构引号、合并转义字符，来源属于 reader 消费的完整 record。
-            question = LocatedText(row[0], (lines[record_start].source_range[0], lines[reader.line_num - 1].source_range[1]))
-            answer = row[1]
-        else:
-            question, answer = row
-
-    if question:
-        pairs.append((question, answer))
-
-    return [(q.strip(), a.strip()) for q, a in pairs if q.strip()]
-
-
-def _parse_markdown_table_row(line: str) -> list[str] | None:
-    if "|" not in line:
-        return None
-
-    text = line.strip()
-    if not text:
-        return None
-
-    if text.startswith("|"):
-        text = text[1:]
-    if text.endswith("|"):
-        text = text[:-1]
-
-    cells = [cell.strip() for cell in text.split("|")]
-    if not cells:
-        return None
-
-    if all(re.fullmatch(r":?-{3,}:?", c.replace(" ", "")) for c in cells if c):
-        return None
-
-    return cells
-
-
-def _extract_pairs_from_markdown_tables(markdown_content: str) -> list[tuple[str, str]]:
-    pairs: list[tuple[str, str]] = []
-
-    for line in (markdown_content or "").splitlines():
-        cells = _parse_markdown_table_row(line)
-        if not cells or len(cells) < 2:
-            continue
-
-        question = cells[0]
-        answer = cells[1]
-        if question and answer:
-            pairs.append((question, answer))
-
-    return pairs
-
-
-def _md_question_level(line: str) -> tuple[int, str]:
-    match = re.match(r"^(#{1,6})(?:[ \t]+|$)", line)
-    if not match:
-        return 0, line
-    return len(match.group(1)), line[match.end() :]
-
-
-def _update_fence_state(line: str, fence: str) -> str:
-    """按行更新代码围栏状态：``` 与 ~~~ 各自成对开关，异类围栏行不关闭当前块。"""
-    stripped = line.strip()
-    if stripped.startswith("```") or stripped.startswith("~~~"):
-        marker = stripped[:3]
-        if not fence:
-            return marker
-        if marker == fence:
-            return ""
-    return fence
-
-
-def _extract_pairs_from_markdown_headings(markdown_content: str) -> list[tuple[str, str]]:
-    """标题提取：按 Markdown 标题层级提取问答对，标题下的内容作为答案，标题本身作为问题。"""
-    lines = (markdown_content or "").splitlines()
-    if not lines:
-        return []
-
-    pairs: list[tuple[str, str]] = []
-    last_answer = ""
-    question_stack: list[str] = []
-    level_stack: list[int] = []
-    fence = ""
-
-    for line in lines:
-        fence = _update_fence_state(line, fence)
-
-        question_level = 0
-        question = ""
-        if not fence:
-            question_level, question = _md_question_level(line)
-
-        if not question_level or question_level > 6:
-            last_answer = join_source_text([last_answer, line], "\n")
-            continue
-
-        if last_answer.strip():
-            sum_question = join_source_text(question_stack, "\n")
-            if sum_question:
-                pairs.append((sum_question, last_answer.strip()))
-            last_answer = ""
-
-        while question_stack and question_level <= level_stack[-1]:
-            question_stack.pop()
-            level_stack.pop()
-
-        question_stack.append(question)
-        level_stack.append(question_level)
-
-    if last_answer.strip():
-        sum_question = join_source_text(question_stack, "\n")
-        if sum_question:
-            pairs.append((sum_question, last_answer.strip()))
-
-    return pairs
-
-
-def _extract_pairs_by_prefix(markdown_content: str) -> list[tuple[str, str]]:
-    """前缀提取：按行首 Q/A 前缀提取问答对，标题行剥掉 # 后按前缀判断，非问答前缀标题仅作分节符结束当前问答对。"""
-    pairs: list[tuple[str, str]] = []
-    question = ""
-    answer_lines: list[str] = []
-
-    heading_re = re.compile(r"^#{1,6}(?:[ \t]+|$)")
-    question_re = re.compile(r"^(?:Q|Question|问|问题)\s*[:：]\s*(.*)$", flags=re.IGNORECASE)
-    answer_re = re.compile(r"^(?:A|Answer|答|回答)\s*[:：]\s*(.*)$", flags=re.IGNORECASE)
-    fence = ""
-
-    def flush_pair() -> None:
-        nonlocal question, answer_lines
-        if question:
-            pairs.append((question, join_source_text(answer_lines, "\n")))
-            question = ""
-            answer_lines = []
-
-    for line in (markdown_content or "").splitlines():
-        stripped = line.strip()
-        is_fence_line = stripped.startswith("```") or stripped.startswith("~~~")
-        fence = _update_fence_state(line, fence)
-        # 围栏行与代码块内容行只可能是答案正文，不参与问答边界判断
-        if is_fence_line or fence:
-            if question:
-                answer_lines.append(line)
-            continue
-
-        heading_match = heading_re.match(line)
-        text = line[heading_match.end() :] if heading_match else line
-
-        q_match = question_re.match(text)
-        if q_match:
-            flush_pair()
-            question = text[q_match.start(1) : q_match.end(1)].strip()
-            continue
-
-        a_match = answer_re.match(text)
-        if a_match:
-            # 答案必须归属活跃问题：问题尚未出现时的前言 A: 行直接忽略，避免孤儿文本被拼进后续真实问答对
-            if question:
-                answer_lines.append(text[a_match.start(1) : a_match.end(1)].strip())
-            continue
-
-        if heading_match:
-            # 非问答前缀的标题是结构性分节，结束当前问答对且标题本身不进入答案，避免附录等内容污染上一对问答
-            flush_pair()
-            continue
-
-        if question:
-            answer_lines.append(line)
-
-    flush_pair()
-
-    return [(q.strip(), a.strip()) for q, a in pairs if q.strip() and a.strip()]
-
-
-def _dedupe_pairs(pairs: list[tuple[str, str]]) -> list[tuple[str, str]]:
-    res: list[tuple[str, str]] = []
-    seen: set[tuple[str, str]] = set()
-
-    for question, answer in pairs:
-        q = question.strip()
-        a = answer.strip()
-        if not q or not a:
-            continue
-        key = (q, a)
-        if key in seen:
-            continue
-        seen.add(key)
-        res.append((q, a))
-
-    return res
-
+# ATX 标题行：group(1) 为井号层级，正文自匹配末尾起
+_HEADING_RE = re.compile(r"^(#{1,6})(?:[ \t]+|$)")
+# 行首问答标记：group(1) 为剥掉标记后的正文
+_QUESTION_LINE_RE = re.compile(r"^(?:Q|Question|问|问题)\s*[:：]\s*(.*)$", flags=re.IGNORECASE)
+_ANSWER_LINE_RE = re.compile(r"^(?:A|Answer|答|回答)\s*[:：]\s*(.*)$", flags=re.IGNORECASE)
+# 半段文本自带的问答标记（含中英文写法），渲染前统一剥掉
+_LABEL_PREFIX_RE = re.compile(r"^(问题|答案|回答|user|assistant|Q|A|Question|Answer|问|答)[\t:： ]+", flags=re.IGNORECASE)
+# Markdown 表格分隔行单元格，如 :--- 、---
+_TABLE_SEPARATOR_CELL_RE = re.compile(r":?-{3,}:?")
 
 # QA chunk 字符数硬上限：bge_m3 等模型限制 4096 tokens，中/英/数字混合内容按保守字符数兜底。
 _QA_CHUNK_MAX_CHARS = 4000
 _QA_QUESTION_PREFIXES = ("问题：", "Question: ")
 _QA_ANSWER_PREFIXES = ("回答：", "Answer: ")
-
-
-def _split_qa_prefix(text: str, prefixes: tuple[str, ...]) -> tuple[str, str]:
-    """从 QA chunk 的半段文本中拆分出前缀和正文。"""
-    for prefix in prefixes:
-        if text.startswith(prefix):
-            return prefix, text[len(prefix) :].strip()
-    return "", text.strip()
-
-
-def _hard_split_text(text: str, max_chars: int) -> list[str]:
-    """按固定字符数硬切，过滤空白片段。"""
-    return [text[i : i + max_chars] for i in range(0, len(text), max_chars) if text[i : i + max_chars].strip()]
-
-
-def _split_answer_by_paragraphs(answer: str, max_chars: int) -> list[str]:
-    """优先按段落切分答案，单段落仍超长则按行、再超长则硬切。"""
-    paragraphs = [p.strip() for p in answer.split("\n\n") if p.strip()]
-    if not paragraphs:
-        return [answer] if answer.strip() else []
-
-    result: list[str] = []
-    current = ""
-    for p in paragraphs:
-        if len(p) > max_chars:
-            if current:
-                result.append(current)
-                current = ""
-            result.extend(_split_answer_by_lines(p, max_chars))
-            continue
-        if current and len(current) + 2 + len(p) > max_chars:
-            result.append(current)
-            current = p
-        else:
-            current = join_source_text([current, p], "\n\n") if current else p
-    if current:
-        result.append(current)
-    return result
-
-
-def _split_answer_by_lines(answer: str, max_chars: int) -> list[str]:
-    """按行切分答案，单行仍超长则硬切。"""
-    # 仅 strip 用于判空，保留原始行：缩进对围栏代码块与嵌套列表有语义
-    lines = [line for line in answer.splitlines() if line.strip()]
-    if not lines:
-        return [answer] if answer.strip() else []
-
-    result: list[str] = []
-    current = ""
-    for line in lines:
-        if len(line) > max_chars:
-            if current:
-                result.append(current)
-                current = ""
-            result.extend(_hard_split_text(line, max_chars))
-            continue
-        if current and len(current) + 1 + len(line) > max_chars:
-            result.append(current)
-            current = line
-        else:
-            current = join_source_text([current, line], "\n") if current else line
-    if current:
-        result.append(current)
-    return result
-
-
-def _split_long_qa_chunks(chunks: list[str], max_chars: int = _QA_CHUNK_MAX_CHARS) -> list[str]:
-    """对超长 QA chunk 保留问题、切分答案，避免单条超过 embedding 上下文上限。"""
-    if max_chars <= 0:
-        return [c.strip() for c in chunks if c and c.strip()]
-
-    result: list[str] = []
-    for chunk in chunks:
-        text = (chunk or "").strip()
-        if not text:
-            continue
-        if len(text) <= max_chars:
-            result.append(text)
-            continue
-
-        # 分隔符必须与序列化问题的语言一致，避免问题正文中的异语言答案标记被误认成结构边界
-        if text.startswith("问题："):
-            marker = "\t回答："
-        elif text.startswith("Question: "):
-            marker = "\tAnswer: "
-        else:
-            marker = ""
-        sep_pos = text.find(marker) if marker else -1
-        if sep_pos == -1:
-            # 非标准 QA 格式，直接硬切兜底
-            result.extend(_hard_split_text(text, max_chars))
-            continue
-
-        q_part, a_part = text[:sep_pos], text[sep_pos + 1 :]
-        q_prefix, q_body = _split_qa_prefix(q_part, _QA_QUESTION_PREFIXES)
-        a_prefix, a_body = _split_qa_prefix(a_part, _QA_ANSWER_PREFIXES)
-        if not q_body or not a_body:
-            result.extend(_hard_split_text(text, max_chars))
-            continue
-
-        if len(q_prefix) + len(q_body) + len(a_prefix) + 1 >= max_chars:
-            # 问题本身已超限，保留问题切答案只会产出 1 字符答案的碎片且仍超限，改为整条硬切
-            result.extend(_hard_split_text(text, max_chars))
-            continue
-
-        # 预留问题部分 + 前缀 + 制表符占位
-        max_answer_chars = max_chars - len(q_prefix) - len(q_body) - len(a_prefix) - 1
-        for sub_answer in _split_answer_by_paragraphs(a_body, max_answer_chars):
-            result.append(join_source_text([q_prefix, q_body, "\t", a_prefix, sub_answer]))
-
-    return result
 
 
 def chunk_markdown(filename: str, markdown_content: str, parser_config: dict[str, Any] | None = None) -> list[str]:
@@ -408,11 +48,7 @@ def chunk_markdown(filename: str, markdown_content: str, parser_config: dict[str
     if filename and "." in filename:
         suffix = "." + filename.lower().split(".")[-1]
 
-    lines = [line for line in (markdown_content or "").splitlines() if line.strip()]
-    locator = SourceSpanLocator(markdown_content)
-    for line in lines:
-        _, _, first, last = locator.locate(line)
-        line.source_range = (first - 1, last)
+    lines = [line for line in markdown_content.splitlines() if line.strip()]
     pairs: list[tuple[str, str]] = []
 
     # 各分支的提取器组合按后缀分发，编号对应 docstring 中的策略步骤
@@ -425,6 +61,7 @@ def chunk_markdown(filename: str, markdown_content: str, parser_config: dict[str
     elif suffix == ".csv":
         # 3. 表格提取与 4. 分隔符（csv 解析）固定执行
         pairs.extend(_extract_pairs_from_markdown_tables(markdown_content))
+        _annotate_line_ranges(lines, markdown_content)
         delimiter = "\t" if any("\t" in line for line in lines) else ","
         pairs.extend(_extract_pairs_from_csv(lines, delimiter))
     elif suffix == ".txt":
@@ -454,15 +91,391 @@ def chunk_markdown(filename: str, markdown_content: str, parser_config: dict[str
     if not pairs and lines:
         # 5. 最后兜底：把内容按 2 行一组构成问答
         for i in range(0, len(lines), 2):
-            q = lines[i]
-            a = lines[i + 1] if i + 1 < len(lines) else ""
-            if q.strip() and a.strip():
-                pairs.append((q, a))
+            question = lines[i]
+            answer = lines[i + 1] if i + 1 < len(lines) else ""
+            if question.strip() and answer.strip():
+                pairs.append((question, answer))
 
-    chunks = [_to_qa_chunk(q, a, eng=eng) for q, a in pairs]
-    # 6/7. 超长 chunk 限长：保留问题切答案，问题本身超限时整条硬切
-    result = []
-    for chunk in chunks:
+    result: list[str] = []
+    for question, answer in pairs:
+        chunk = _to_qa_chunk(question, answer, eng=eng)
+        # 6/7. 超长 chunk 限长：保留问题切答案，问题本身超限时整条硬切；切分片段继承原 chunk 来源区间
         parts = _split_long_qa_chunks([chunk])
-        result.extend(LocatedText(str(part), chunk.source_range) if isinstance(chunk, LocatedText) else part for part in parts)
+        if isinstance(chunk, LocatedText):
+            result.extend(LocatedText(str(part), chunk.source_range) for part in parts)
+        else:
+            result.extend(parts)
     return result
+
+
+# ---------- 问答对提取器 ----------
+
+
+def _extract_pairs_by_prefix(markdown_content: str) -> list[tuple[str, str]]:
+    """前缀提取：按行首 Q/A 前缀提取问答对，标题行剥掉 # 后按前缀判断，非问答前缀标题仅作分节符结束当前问答对。"""
+    pairs: list[tuple[str, str]] = []
+    question = ""
+    answer_lines: list[str] = []
+    fence = ""
+
+    def flush_pair() -> None:
+        nonlocal question, answer_lines
+        if question:
+            pairs.append((question, join_source_text(answer_lines, "\n")))
+            question = ""
+            answer_lines = []
+
+    for line in (markdown_content or "").splitlines():
+        stripped = line.strip()
+        is_fence_line = stripped.startswith("```") or stripped.startswith("~~~")
+        fence = _update_fence_state(line, fence)
+        # 围栏行与代码块内容行只可能是答案正文，不参与问答边界判断
+        if is_fence_line or fence:
+            if question:
+                answer_lines.append(line)
+            continue
+
+        heading_match = _HEADING_RE.match(line)
+        text = line[heading_match.end() :] if heading_match else line
+
+        q_match = _QUESTION_LINE_RE.match(text)
+        if q_match:
+            flush_pair()
+            question = text[q_match.start(1) : q_match.end(1)].strip()
+            continue
+
+        a_match = _ANSWER_LINE_RE.match(text)
+        if a_match:
+            # 答案必须归属活跃问题：问题尚未出现时的前言 A: 行直接忽略，避免孤儿文本被拼进后续真实问答对
+            if question:
+                answer_lines.append(text[a_match.start(1) : a_match.end(1)].strip())
+            continue
+
+        if heading_match:
+            # 非问答前缀的标题是结构性分节，结束当前问答对且标题本身不进入答案，避免附录等内容污染上一对问答
+            flush_pair()
+            continue
+
+        if question:
+            answer_lines.append(line)
+
+    flush_pair()
+
+    return [(q.strip(), a.strip()) for q, a in pairs if q.strip() and a.strip()]
+
+
+def _update_fence_state(line: str, fence: str) -> str:
+    """按行更新代码围栏状态：``` 与 ~~~ 各自成对开关，异类围栏行不关闭当前块。"""
+    stripped = line.strip()
+    if stripped.startswith("```") or stripped.startswith("~~~"):
+        marker = stripped[:3]
+        if not fence:
+            return marker
+        if marker == fence:
+            return ""
+    return fence
+
+
+def _md_question_level(line: str) -> tuple[int, str]:
+    """识别 ATX 标题行，返回 (层级, 标题正文)；非标题行返回 (0, 原行)。"""
+    match = _HEADING_RE.match(line)
+    if not match:
+        return 0, line
+    return len(match.group(1)), line[match.end() :]
+
+
+def _extract_pairs_from_markdown_headings(markdown_content: str) -> list[tuple[str, str]]:
+    """标题提取：按 Markdown 标题层级提取问答对，标题下的内容作为答案，标题本身作为问题。"""
+    pairs: list[tuple[str, str]] = []
+    question_stack: list[str] = []
+    level_stack: list[int] = []
+    last_answer = ""
+    fence = ""
+
+    def flush_pair() -> None:
+        """落盘当前标题路径与累积答案；多级标题按层级栈拼成完整问题路径。"""
+        nonlocal last_answer
+        if not last_answer.strip():
+            return
+        question_path = join_source_text(question_stack, "\n")
+        if question_path:
+            pairs.append((question_path, last_answer.strip()))
+        last_answer = ""
+
+    for line in (markdown_content or "").splitlines():
+        fence = _update_fence_state(line, fence)
+
+        question_level = 0
+        question = ""
+        if not fence:
+            question_level, question = _md_question_level(line)
+
+        if not question_level:
+            last_answer = join_source_text([last_answer, line], "\n")
+            continue
+
+        flush_pair()
+        while question_stack and question_level <= level_stack[-1]:
+            question_stack.pop()
+            level_stack.pop()
+
+        question_stack.append(question)
+        level_stack.append(question_level)
+
+    flush_pair()
+    return pairs
+
+
+def _parse_markdown_table_row(line: str) -> list[str] | None:
+    """解析 Markdown 表格行为单元格列表；无竖线、空行与分隔行返回 None。"""
+    if "|" not in line:
+        return None
+
+    text = line.strip()
+    if not text:
+        return None
+
+    if text.startswith("|"):
+        text = text[1:]
+    if text.endswith("|"):
+        text = text[:-1]
+
+    cells = [cell.strip() for cell in text.split("|")]
+    if all(_TABLE_SEPARATOR_CELL_RE.fullmatch(cell.replace(" ", "")) for cell in cells if cell):
+        return None
+
+    return cells
+
+
+def _extract_pairs_from_markdown_tables(markdown_content: str) -> list[tuple[str, str]]:
+    """表格提取：两列及以上的 Markdown 表格行，前两列作为问答对。"""
+    pairs: list[tuple[str, str]] = []
+
+    for line in (markdown_content or "").splitlines():
+        cells = _parse_markdown_table_row(line)
+        if not cells or len(cells) < 2:
+            continue
+
+        question, answer = cells[0], cells[1]
+        if question and answer:
+            pairs.append((question, answer))
+
+    return pairs
+
+
+def _guess_delimiter(lines: list[str]) -> str:
+    """统计恰好含一个逗号/制表符的行数，tab 行不少于逗号行时优先 tab。"""
+    comma_lines = sum(1 for line in lines if line.count(",") == 1)
+    tab_lines = sum(1 for line in lines if line.count("\t") == 1)
+    return "\t" if tab_lines >= comma_lines else ","
+
+
+def _extract_pairs_with_delimiter(lines: list[str], delimiter: str) -> list[tuple[str, str]]:
+    """分隔符提取：按单分隔符切两列；列数不符的行并入当前答案，成对问答在下一对出现时落盘。"""
+    pairs: list[tuple[str, str]] = []
+    question = ""
+    answer = ""
+
+    for line in lines:
+        parts = line.split(delimiter)
+        if len(parts) != 2:
+            if question:
+                answer += "\n" + line
+            continue
+
+        if question and answer:
+            pairs.append((question, answer))
+        question, answer = parts
+
+    if question:
+        pairs.append((question, answer))
+
+    return [(q.strip(), a.strip()) for q, a in pairs if q.strip()]
+
+
+def _extract_pairs_from_csv(lines: list[str], delimiter: str) -> list[tuple[str, str]]:
+    """csv 解析提取两列问答；跨行引号 record 的来源区间覆盖 reader 消费的全部原始行。"""
+    pairs: list[tuple[str, str]] = []
+    question = ""
+    answer = ""
+
+    reader = csv.reader(lines, delimiter=delimiter)
+    record_start_line = 0
+    for row in reader:
+        # csv.reader 消费的 record 可能横跨多行（引号内换行），reader.line_num 即该 record 的末行行号
+        record_lines = lines[record_start_line : reader.line_num]
+        raw_line = join_source_text(record_lines, "\n")
+        record_start_line = reader.line_num
+
+        if len(row) != 2:
+            # 列数不符的 record 并入当前答案，问题的来源区间同步扩展到该 record 末行
+            if question:
+                answer += "\n" + raw_line
+                if isinstance(question, LocatedText):
+                    question.source_range = (question.source_range[0], record_lines[-1].source_range[1])
+            continue
+
+        if question and answer:
+            pairs.append((question, answer))
+        if isinstance(raw_line, SourceText):
+            # CSV 解码删除结构引号、合并转义字符，来源属于 reader 消费的完整 record
+            question = LocatedText(row[0], (record_lines[0].source_range[0], record_lines[-1].source_range[1]))
+            answer = row[1]
+        else:
+            question, answer = row
+
+    if question:
+        pairs.append((question, answer))
+
+    return [(q.strip(), a.strip()) for q, a in pairs if q.strip()]
+
+
+def _annotate_line_ranges(lines: list[str], source: str) -> None:
+    """为每行标注 0-based 半开行号区间；CSV 提取器据此把多行 record 定位回原文。"""
+    locator = SourceSpanLocator(source)
+    for line in lines:
+        _, _, first, last = locator.locate(line)
+        line.source_range = (first - 1, last)
+
+
+def _dedupe_pairs(pairs: list[tuple[str, str]]) -> list[tuple[str, str]]:
+    """按 (问题, 答案) 去重并丢弃空半段，保持首次出现顺序。"""
+    res: list[tuple[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+
+    for question, answer in pairs:
+        q = question.strip()
+        a = answer.strip()
+        if not q or not a:
+            continue
+        key = (q, a)
+        if key in seen:
+            continue
+        seen.add(key)
+        res.append((q, a))
+
+    return res
+
+
+# ---------- 问答对渲染 ----------
+
+
+def _rm_prefix(text: str) -> str:
+    """剥掉半段文本行首自带的问答标记前缀，避免渲染后出现双重前缀。"""
+    cleaned = text.strip()
+    match = _LABEL_PREFIX_RE.match(cleaned)
+    return cleaned[match.end() :] if match else cleaned
+
+
+def _to_qa_chunk(question: str, answer: str, eng: bool = False) -> str:
+    """渲染问答对为「问题：…\\t回答：…」文本；问题携带来源行区间时为产物附加同一区间。"""
+    question_prefix = "Question: " if eng else "问题："
+    answer_prefix = "Answer: " if eng else "回答："
+    content = join_source_text([question_prefix + _rm_prefix(question), answer_prefix + _rm_prefix(answer)], "\t")
+    if isinstance(question, LocatedText):
+        return LocatedText(str(content), question.source_range)
+    return content
+
+
+# ---------- 超长 chunk 限长 ----------
+
+
+def _split_long_qa_chunks(chunks: list[str], max_chars: int = _QA_CHUNK_MAX_CHARS) -> list[str]:
+    """对超长 QA chunk 保留问题、切分答案，避免单条超过 embedding 上下文上限。"""
+    if max_chars <= 0:
+        return [chunk.strip() for chunk in chunks if chunk.strip()]
+
+    result: list[str] = []
+    for chunk in chunks:
+        text = chunk.strip()
+        if text:
+            result.extend(_split_single_chunk(text, max_chars))
+    return result
+
+
+def _split_single_chunk(text: str, max_chars: int) -> list[str]:
+    """单条 chunk 限长：不超限原样返回；超限时优先保留问题切分答案，无法保留结构则整条硬切。"""
+    if len(text) <= max_chars:
+        return [text]
+
+    # 分隔符必须与序列化问题的语言一致，避免问题正文中的异语言答案标记被误认成结构边界
+    if text.startswith("问题："):
+        marker = "\t回答："
+    elif text.startswith("Question: "):
+        marker = "\tAnswer: "
+    else:
+        marker = ""
+    sep_pos = text.find(marker) if marker else -1
+    if sep_pos == -1:
+        # 非标准 QA 格式，直接硬切兜底
+        return _hard_split_text(text, max_chars)
+
+    # marker 以结构制表符开头，+1 跳过它即得到答案半段
+    q_part, a_part = text[:sep_pos], text[sep_pos + 1 :]
+    q_prefix, q_body = _split_qa_prefix(q_part, _QA_QUESTION_PREFIXES)
+    a_prefix, a_body = _split_qa_prefix(a_part, _QA_ANSWER_PREFIXES)
+    if not q_body or not a_body:
+        return _hard_split_text(text, max_chars)
+
+    if len(q_prefix) + len(q_body) + len(a_prefix) + 1 >= max_chars:
+        # 问题本身已超限，保留问题切答案只会产出 1 字符答案的碎片且仍超限，改为整条硬切
+        return _hard_split_text(text, max_chars)
+
+    # 总预算扣除问题正文、两个前缀与结构制表符后全部留给答案
+    max_answer_chars = max_chars - len(q_prefix) - len(q_body) - len(a_prefix) - 1
+    return [
+        join_source_text([q_prefix, q_body, "\t", a_prefix, sub_answer])
+        for sub_answer in _split_answer_by_paragraphs(a_body, max_answer_chars)
+    ]
+
+
+def _split_qa_prefix(text: str, prefixes: tuple[str, ...]) -> tuple[str, str]:
+    """从 QA chunk 的半段文本中拆分出前缀和正文。"""
+    for prefix in prefixes:
+        if text.startswith(prefix):
+            return prefix, text[len(prefix) :].strip()
+    return "", text.strip()
+
+
+def _split_answer_by_paragraphs(answer: str, max_chars: int) -> list[str]:
+    """优先按段落切分答案，单段落仍超长则按行、再超长则硬切。"""
+    paragraphs = [p.strip() for p in answer.split("\n\n") if p.strip()]
+    if not paragraphs:
+        return [answer] if answer.strip() else []
+    return _pack_segments(paragraphs, max_chars, "\n\n", _split_answer_by_lines)
+
+
+def _split_answer_by_lines(answer: str, max_chars: int) -> list[str]:
+    """按行切分答案，单行仍超长则硬切。"""
+    # 仅 strip 用于判空，保留原始行：缩进对围栏代码块与嵌套列表有语义
+    lines = [line for line in answer.splitlines() if line.strip()]
+    if not lines:
+        return [answer] if answer.strip() else []
+    return _pack_segments(lines, max_chars, "\n", _hard_split_text)
+
+
+def _pack_segments(segments: list[str], max_chars: int, separator: str, split_overlong: Callable[[str, int], list[str]]) -> list[str]:
+    """贪心打包片段：装不下先落盘当前段，单段本身超限交给更细粒度的切分函数。"""
+    result: list[str] = []
+    current = ""
+    for segment in segments:
+        if len(segment) > max_chars:
+            if current:
+                result.append(current)
+                current = ""
+            result.extend(split_overlong(segment, max_chars))
+            continue
+        if current and len(current) + len(separator) + len(segment) > max_chars:
+            result.append(current)
+            current = segment
+        else:
+            current = join_source_text([current, segment], separator) if current else segment
+    if current:
+        result.append(current)
+    return result
+
+
+def _hard_split_text(text: str, max_chars: int) -> list[str]:
+    """按固定字符数硬切，过滤空白片段。"""
+    parts = [text[i : i + max_chars] for i in range(0, len(text), max_chars)]
+    return [part for part in parts if part.strip()]

@@ -1,3 +1,5 @@
+"""基于 LLM 的实体/关系抽取器。"""
+
 from __future__ import annotations
 
 import math
@@ -36,7 +38,13 @@ MAX_EXTRACTION_TIMEOUT_SECONDS = 600.0
 class LLMGraphExtractor(GraphExtractor):
     extractor_type = "llm"
 
+    def __init__(self, options: dict[str, Any] | None = None):
+        """每个构建任务保留一个模型客户端，供分块并发调用。"""
+        super().__init__(options)
+        self._model = None
+
     def validate_options(self) -> None:
+        """校验模型、并发与超时配置，拒绝已知会破坏构建的参数形态。"""
         if not self.options.get("model_spec"):
             raise ValueError("LLM 抽取器需要 model_spec")
         if self.options.get("prompt"):
@@ -61,13 +69,8 @@ class LLMGraphExtractor(GraphExtractor):
                 'LLM 抽取器 model_params 不支持顶层 enable_thinking，请写在 extra_body 中，例如 {"extra_body": {"enable_thinking": false}}'
             )
 
-    def __init__(self, options: dict[str, Any] | None = None):
-        """每个构建任务保留一个模型客户端，供分块并发调用。"""
-        super().__init__(options)
-        self._model = None
-
-    async def extract(self, text: str, *, chunk_metadata: dict[str, Any] | None = None) -> dict[str, Any]:
-        """使用任务内复用的客户端抽取单个分块。"""
+    async def extract(self, text: str, *, chunk_metadata: dict[str, Any] | None = None) -> Any:
+        """抽取单个分块；返回原始 JSON 结构，形状由 normalize_extraction_result 校验。"""
         if self._model is None:
             self.validate_options()
             self._model = select_model(
@@ -81,6 +84,7 @@ class LLMGraphExtractor(GraphExtractor):
         return parsed
 
     def _build_prompt(self, text: str) -> str:
+        """拼装默认抽取指令、可选 Schema 约束与待抽取文本。"""
         extraction_prompt = DEFAULT_TRIPLE_EXTRACTION_PROMPT
         schema = str(self.options.get("schema") or "").strip()
         if schema:
@@ -88,6 +92,7 @@ class LLMGraphExtractor(GraphExtractor):
         return f"{extraction_prompt}\n\n文本：\n{text}"
 
     def _resolve_timeout_seconds(self) -> float:
+        """解析并钳制单次抽取超时，非法形态一律按配置错误拒绝。"""
         raw = self.options.get("timeout_seconds", DEFAULT_EXTRACTION_TIMEOUT_SECONDS)
         # bool 是 int 的子类：float(True) == 1.0 会被区间校验放行，配出一个 1 秒的超时，
         # 构建时每块必超时——配置保存成功、整个图谱全挂，是最难排查的失败形态。

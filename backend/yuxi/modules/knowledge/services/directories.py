@@ -15,7 +15,7 @@ async def create_folder(kb_id: str, name: str, parent_id: str | None, operator_i
         await repo.lock(session, kb_id)
         await repo.parent(session, kb_id, parent_id)
         folder = await repo.folder(session, kb_id, parent_id, name, operator_id, reuse=False)
-        result = KnowledgeExecutor._file_record_to_meta(folder)
+        result = KnowledgeExecutor.file_record_to_meta(folder)
     return result
 
 
@@ -44,7 +44,7 @@ async def change_node(kb_id: str, file_id: str, *, name: str | None = None, pare
         if name is not None:
             node.filename, node.path = name, name
         await repo.flush(session)
-        result = KnowledgeExecutor._file_record_to_meta(node)
+        result = KnowledgeExecutor.file_record_to_meta(node)
     return result
 
 

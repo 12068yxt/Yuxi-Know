@@ -1,3 +1,5 @@
+"""带 SSRF 防护的 URL 抓取：域名白名单、DNS 解析钉扎与大小/类型限制。"""
+
 import asyncio
 import ipaddress
 import socket
@@ -31,8 +33,75 @@ EXTRA_BLOCKED_ADDRESSES = frozenset(
 ResolvedAddresses = list[ipaddress.IPv4Address | ipaddress.IPv6Address]
 
 
+async def fetch_url_content(url: str, max_size: int = MAX_DOWNLOAD_SIZE) -> tuple[bytes, str]:
+    """抓取 URL 内容，校验白名单、Content-Type 和大小上限，返回 (内容, 最终 URL)。"""
+    if not is_url_parsing_enabled():
+        raise ValueError("URL parsing feature is disabled")
+
+    is_valid, error_msg = validate_url(url)
+    if not is_valid:
+        raise ValueError(f"Invalid URL: {error_msg}")
+
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
+        )
+    }
+    current_url = url
+    redirect_count = 0
+    max_redirects = 5
+
+    # 手动跟随重定向，让每一跳（含重定向目标和 IP 字面量）都重新过白名单；
+    # 私网拦截由 SSRFGuardBackend 在每次连接时按同一次解析结果执行。
+    try:
+        async with httpx.AsyncClient(timeout=30.0, follow_redirects=False, transport=SSRFGuardTransport()) as client:
+            while True:
+                logger.info(f"Fetching URL: {current_url}")
+
+                # 先流式读取响应头，再决定重定向、拒绝或下载。
+                async with client.stream("GET", current_url, headers=headers) as response:
+                    if response.status_code in (301, 302, 303, 307, 308):
+                        if redirect_count >= max_redirects:
+                            raise ValueError("Too many redirects")
+
+                        redirect_count += 1
+                        location = response.headers.get("Location")
+                        if not location:
+                            raise ValueError("Redirect response missing Location header")
+
+                        current_url = urljoin(current_url, location)
+                        is_valid, error_msg = validate_url(current_url)
+                        if not is_valid:
+                            raise ValueError(f"Redirected to invalid URL: {error_msg}")
+                        continue
+
+                    response.raise_for_status()
+
+                    content_type = response.headers.get("Content-Type", "").lower()
+                    if not any(allowed in content_type for allowed in ALLOWED_CONTENT_TYPES):
+                        raise ValueError(f"Unsupported Content-Type: {content_type}. Only HTML is supported.")
+
+                    content = bytearray()
+                    async for chunk in response.aiter_bytes():
+                        content.extend(chunk)
+                        if len(content) > max_size:
+                            raise ValueError(f"Content size exceeds limit of {max_size} bytes")
+
+                    return bytes(content), current_url
+
+    except httpx.HTTPError as e:
+        logger.error(f"HTTP error fetching {url}: {e}")
+        raise ValueError(f"Failed to fetch URL: {e}")
+    except Exception as e:
+        logger.error(f"Error fetching {url}: {e}")
+        raise ValueError(f"Error fetching URL: {str(e)}")
+
+
+# ==== 地址解析与私网拦截 ====
+
+
 async def resolve_hostname_addresses(hostname: str) -> ResolvedAddresses:
-    """Resolve a hostname to deduped IP addresses, failing closed on errors."""
+    """解析主机名为去重 IP 列表，解析失败按不安全处理。"""
     try:
         infos = await asyncio.to_thread(socket.getaddrinfo, hostname, None)
     except Exception as e:
@@ -53,24 +122,26 @@ async def resolve_hostname_addresses(hostname: str) -> ResolvedAddresses:
 
 
 def is_blocked_address(address: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
-    """True for any non-public address, including known cloud metadata ranges."""
+    """非公网地址（含已知云元数据段）返回 True。"""
     return not address.is_global or address in EXTRA_BLOCKED_ADDRESSES
 
 
 def assert_no_blocked_address(addresses: ResolvedAddresses) -> None:
+    """任一解析地址落在封锁段即拒绝连接。"""
     blocked = [str(address) for address in addresses if is_blocked_address(address)]
     if blocked:
         raise ValueError(f"Access to private IP addresses is forbidden: {', '.join(blocked)}")
 
 
-class SSRFGuardBackend(httpcore.AsyncNetworkBackend):
-    """Network backend that connects only to pre-validated public IPs.
+# ==== httpcore/httpx 的 SSRF 防护接线 ====
 
-    Resolution happens once inside connect_tcp; the same resolved IP is used
-    for the connection, closing the DNS rebinding window. TLS SNI and
-    certificate verification keep using the original hostname because
-    httpcore takes the server_hostname from request extensions, not from the
-    socket address.
+
+class SSRFGuardBackend(httpcore.AsyncNetworkBackend):
+    """只连接预校验公网 IP 的网络 backend。
+
+    解析在 connect_tcp 内只发生一次，且连接复用同一次解析出的 IP，
+    关闭 DNS rebinding 窗口；TLS SNI 与证书校验仍用原主机名，
+    因为 httpcore 从请求 extensions 取 server_hostname，而非 socket 地址。
     """
 
     def __init__(self, default_backend: httpcore.AsyncNetworkBackend | None = None):
@@ -116,7 +187,7 @@ def _create_default_backend() -> httpcore.AsyncNetworkBackend:
 
 
 class SSRFGuardTransport(httpx.AsyncHTTPTransport):
-    """httpx transport whose connection pool uses SSRFGuardBackend.
+    """连接池使用 SSRFGuardBackend 的 httpx transport。
 
     httpx 0.28 不向 AsyncConnectionPool 暴露 network_backend 参数，这里在
     连接懒加载开始前替换 pool 的 backend 字段。
@@ -125,91 +196,3 @@ class SSRFGuardTransport(httpx.AsyncHTTPTransport):
     def __init__(self, backend: SSRFGuardBackend | None = None, **kwargs):
         super().__init__(**kwargs)
         self._pool._network_backend = backend or SSRFGuardBackend()
-
-
-async def fetch_url_content(url: str, max_size: int = MAX_DOWNLOAD_SIZE) -> tuple[bytes, str]:
-    """
-    Fetch URL content with security checks (size limit, content type, private IP blocking).
-
-    Args:
-        url: The URL to fetch.
-        max_size: Maximum allowed size in bytes.
-
-    Returns:
-        tuple: (content_bytes, final_url)
-
-    Raises:
-        ValueError: If validation fails or download error occurs.
-    """
-    if not is_url_parsing_enabled():
-        raise ValueError("URL parsing feature is disabled")
-
-    # Initial validation
-    is_valid, error_msg = validate_url(url)
-    if not is_valid:
-        raise ValueError(f"Invalid URL: {error_msg}")
-
-    current_url = url
-    redirect_count = 0
-    max_redirects = 5
-
-    # We handle redirects manually to check each target URL against the
-    # whitelist; private-IP blocking is enforced per connection by
-    # SSRFGuardBackend, so every hop (including redirect targets and IP
-    # literals) is resolved once, validated, and connected to the same IP.
-    try:
-        async with httpx.AsyncClient(timeout=30.0, follow_redirects=False, transport=SSRFGuardTransport()) as client:
-            while True:
-                logger.info(f"Fetching URL: {current_url}")
-
-                # Request headers
-                headers = {
-                    "User-Agent": (
-                        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-                        "(KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
-                    )
-                }
-
-                # Stream the response to check headers before downloading body
-                async with client.stream("GET", current_url, headers=headers) as response:
-                    # Handle Redirects
-                    if response.status_code in (301, 302, 303, 307, 308):
-                        if redirect_count >= max_redirects:
-                            raise ValueError("Too many redirects")
-
-                        redirect_count += 1
-                        location = response.headers.get("Location")
-                        if not location:
-                            raise ValueError("Redirect response missing Location header")
-
-                        current_url = urljoin(current_url, location)
-
-                        # Validate the new URL
-                        is_valid, error_msg = validate_url(current_url)
-                        if not is_valid:
-                            raise ValueError(f"Redirected to invalid URL: {error_msg}")
-
-                        continue  # Start new request
-
-                    response.raise_for_status()
-
-                    # Check Content-Type
-                    content_type = response.headers.get("Content-Type", "").lower()
-                    if not any(allowed in content_type for allowed in ALLOWED_CONTENT_TYPES):
-                        raise ValueError(f"Unsupported Content-Type: {content_type}. Only HTML is supported.")
-
-                    # Download content with size limit
-                    content = bytearray()
-                    async for chunk in response.aiter_bytes():
-                        content.extend(chunk)
-                        if len(content) > max_size:
-                            raise ValueError(f"Content size exceeds limit of {max_size} bytes")
-
-                    return bytes(content), current_url
-
-    except httpx.HTTPError as e:
-        logger.error(f"HTTP error fetching {url}: {e}")
-        raise ValueError(f"Failed to fetch URL: {e}")
-    except Exception as e:
-        logger.error(f"Error fetching {url}: {e}")
-        raise ValueError(f"Error fetching URL: {str(e)}")

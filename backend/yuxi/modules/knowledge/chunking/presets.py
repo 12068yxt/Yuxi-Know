@@ -1,3 +1,5 @@
+"""分块预设注册表、ID 归一化与 KB/文件/请求三层的参数解析。"""
+
 from __future__ import annotations
 
 from copy import deepcopy
@@ -45,6 +47,7 @@ class ChunkConfigError(ValueError):
 
 
 def deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
+    """递归合并字典，override 覆盖同名标量并深合并同名子字典。"""
     result = deepcopy(base)
     for key, value in (override or {}).items():
         if isinstance(value, dict) and isinstance(result.get(key), dict):
@@ -71,6 +74,7 @@ def normalize_chunk_preset_id(value: str | None) -> str:
 
 
 def map_to_internal_parser_id(preset_id: str) -> str:
+    """把预设 ID 映射为内部分块器 ID（general 走 naive 实现）。"""
     normalized = normalize_chunk_preset_id(preset_id)
     if normalized == DEFAULT_CHUNK_PRESET_ID:
         return GENERAL_INTERNAL_PARSER_ID
@@ -78,6 +82,7 @@ def map_to_internal_parser_id(preset_id: str) -> str:
 
 
 def ensure_chunk_defaults_in_additional_params(additional_params: dict[str, Any] | None) -> dict[str, Any]:
+    """补齐默认分块预设并拦截非字典的解析配置。"""
     params = dict(additional_params or {})
     params["chunk_preset_id"] = normalize_chunk_preset_id(params.get("chunk_preset_id"))
 
@@ -105,18 +110,10 @@ def resolve_chunk_processing_params(
     preset_id = normalize_chunk_preset_id(preset_id)
 
     parser_config: dict[str, Any] = {}
-
-    kb_parser_config = kb_additional.get("chunk_parser_config")
-    if isinstance(kb_parser_config, dict):
-        parser_config = deep_merge(parser_config, kb_parser_config)
-
-    file_parser_config = file_params.get("chunk_parser_config")
-    if isinstance(file_parser_config, dict):
-        parser_config = deep_merge(parser_config, file_parser_config)
-
-    req_parser_config = request.get("chunk_parser_config")
-    if isinstance(req_parser_config, dict):
-        parser_config = deep_merge(parser_config, req_parser_config)
+    for params in (kb_additional, file_params, request):
+        config = params.get("chunk_parser_config")
+        if isinstance(config, dict):
+            parser_config = deep_merge(parser_config, config)
 
     return {
         "chunk_preset_id": preset_id,
@@ -126,6 +123,7 @@ def resolve_chunk_processing_params(
 
 
 def get_chunk_preset_options() -> list[dict[str, str]]:
+    """按注册顺序输出管理端可选预设。"""
     return [
         {"value": preset_id, "label": preset["label"], "description": preset["description"]} for preset_id, preset in CHUNK_PRESETS.items()
     ]

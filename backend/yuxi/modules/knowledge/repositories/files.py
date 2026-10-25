@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-from collections.abc import AsyncIterator, Iterator
-from contextlib import asynccontextmanager
 from typing import Any
 
 from sqlalchemy import case, func, or_, select, update
@@ -13,80 +11,9 @@ from yuxi.modules.knowledge.file_status import FileStatus, status_filter_values
 from yuxi.modules.knowledge.models import KnowledgeBase, KnowledgeFile, KnowledgeProjectionOutbox
 from yuxi.shared.datetime import utc_now
 
-# asyncpg 单条 SQL 参数上限为 32767；按 file_id 批量查询时统一分批。
-SQL_IN_BATCH_SIZE = 10_000
-
 
 class KnowledgeFileRepository:
-    @asynccontextmanager
-    async def lock_file_tree(self, kb_id: str) -> AsyncIterator[None]:
-        """按知识库串行化目录树结构修改。"""
-        async with pg_manager.get_async_session_context() as session:
-            await session.execute(select(func.pg_advisory_xact_lock(func.hashtext(kb_id))))
-            yield
-
-    async def aggregate_dashboard_stats(self) -> list[tuple[str, int, int, int]]:
-        """按文件类型聚合真实文件数、大小与 Chunk 数。"""
-        async with pg_manager.get_async_session_context() as session:
-            result = await session.execute(
-                select(
-                    KnowledgeFile.file_type,
-                    func.count(KnowledgeFile.file_id),
-                    func.coalesce(func.sum(KnowledgeFile.file_size), 0),
-                    func.coalesce(func.sum(KnowledgeFile.chunk_count), 0),
-                )
-                .where(
-                    KnowledgeFile.deleted_at.is_(None),
-                    or_(KnowledgeFile.is_folder.is_(False), KnowledgeFile.is_folder.is_(None)),
-                )
-                .group_by(KnowledgeFile.file_type)
-            )
-            return [
-                (str(file_type or "unknown"), int(count or 0), int(size or 0), int(nodes or 0))
-                for file_type, count, size, nodes in result.all()
-            ]
-
-    _writable_fields = {
-        "kb_id",
-        "parent_id",
-        "filename",
-        "original_filename",
-        "file_type",
-        "path",
-        "minio_url",
-        "markdown_file",
-        "status",
-        "content_hash",
-        "file_size",
-        "chunk_count",
-        "token_count",
-        "content_type",
-        "processing_params",
-        "is_folder",
-        "error_message",
-        "processing_job_id",
-        "processing_owner",
-        "created_by",
-        "updated_by",
-        "generation",
-        "active_generation",
-        "building_generation",
-        "deleted_at",
-        "projection_status",
-        "projection_error",
-    }
-
-    @staticmethod
-    def _iter_batches(items: list[str], batch_size: int = SQL_IN_BATCH_SIZE) -> Iterator[list[str]]:
-        for index in range(0, len(items), batch_size):
-            yield items[index : index + batch_size]
-
-    @classmethod
-    def _sanitize_data(cls, data: dict[str, Any]) -> dict[str, Any]:
-        sanitized = {key: value for key, value in data.items() if key in cls._writable_fields}
-        if sanitized:
-            sanitized["updated_at"] = utc_now()
-        return sanitized
+    """知识库文件与目录节点事实的持久化查询、写入与删除登记。"""
 
     async def get_by_file_id(self, file_id: str, *, include_deleted: bool = False) -> KnowledgeFile | None:
         filters = [KnowledgeFile.file_id == file_id]
@@ -96,25 +23,115 @@ class KnowledgeFileRepository:
             result = await session.execute(select(KnowledgeFile).where(*filters))
             return result.scalar_one_or_none()
 
-    async def list_active_generations(self, kb_id: str) -> list[tuple[str, int]]:
-        """只读取可见文件的 active 代次，供向量库在截取 top-k 前过滤。"""
-        async with pg_manager.get_async_session_context() as session:
-            rows = await session.execute(
-                select(KnowledgeFile.file_id, KnowledgeFile.active_generation)
-                .join(KnowledgeBase, KnowledgeBase.kb_id == KnowledgeFile.kb_id)
-                .where(
-                    KnowledgeFile.kb_id == kb_id,
-                    KnowledgeFile.deleted_at.is_(None),
-                    KnowledgeBase.deleted_at.is_(None),
-                    KnowledgeFile.is_folder.is_(False),
-                )
-            )
-            return [(row.file_id, int(row.active_generation)) for row in rows]
-
     async def list_by_kb_id(self, kb_id: str) -> list[KnowledgeFile]:
         async with pg_manager.get_async_session_context() as session:
             result = await session.execute(select(KnowledgeFile).where(KnowledgeFile.kb_id == kb_id, KnowledgeFile.deleted_at.is_(None)))
             return list(result.scalars().all())
+
+    async def list_children(self, *, kb_id: str, parent_id: str | None) -> list[KnowledgeFile]:
+        async with pg_manager.get_async_session_context() as session:
+            result = await session.execute(
+                select(KnowledgeFile)
+                .where(
+                    KnowledgeFile.kb_id == kb_id,
+                    KnowledgeFile.deleted_at.is_(None),
+                    self._parent_condition(parent_id),
+                )
+                .order_by(KnowledgeFile.is_folder.desc(), func.lower(KnowledgeFile.filename).asc())
+            )
+            return list(result.scalars().all())
+
+    async def list_documents(
+        self,
+        *,
+        kb_id: str,
+        parent_id: str | None = None,
+        status: str | None = None,
+        page: int = 1,
+        page_size: int = 100,
+        recursive: bool = False,
+        files_only: bool = False,
+    ) -> tuple[list[KnowledgeFile], int]:
+        page = max(int(page or 1), 1)
+        page_size = min(max(int(page_size or 100), 1), 500)
+        offset = (page - 1) * page_size
+        has_status_filter = self._status_condition(status) is not None
+        effective_recursive = recursive and has_status_filter
+        filters = self._document_filters(
+            kb_id=kb_id,
+            parent_id=parent_id,
+            status=status,
+            recursive=effective_recursive,
+            files_only=files_only,
+        )
+
+        async with pg_manager.get_async_session_context() as session:
+            total_result = await session.execute(select(func.count()).select_from(KnowledgeFile).where(*filters))
+            total = int(total_result.scalar_one() or 0)
+
+            result = await session.execute(
+                select(KnowledgeFile)
+                .where(*filters)
+                .order_by(
+                    KnowledgeFile.is_folder.desc(),
+                    func.lower(KnowledgeFile.filename).asc(),
+                    KnowledgeFile.created_at.desc(),
+                    KnowledgeFile.file_id.asc(),
+                )
+                .offset(offset)
+                .limit(page_size)
+            )
+            return list(result.scalars().all()), total
+
+    @staticmethod
+    def _status_condition(status: str | None):
+        values = status_filter_values(status)
+        return KnowledgeFile.status.in_(values) if values else None
+
+    @staticmethod
+    def _parent_condition(parent_id: str | None):
+        if parent_id:
+            return KnowledgeFile.parent_id == parent_id
+        return KnowledgeFile.parent_id.is_(None)
+
+    def _document_filters(
+        self,
+        *,
+        kb_id: str,
+        parent_id: str | None,
+        status: str | None,
+        recursive: bool,
+        files_only: bool,
+    ) -> list:
+        filters = [KnowledgeFile.kb_id == kb_id, KnowledgeFile.deleted_at.is_(None)]
+        if not recursive:
+            filters.append(self._parent_condition(parent_id))
+        if files_only:
+            filters.append(KnowledgeFile.is_folder.is_(False))
+
+        status_condition = self._status_condition(status)
+        if status_condition is not None:
+            # 状态是文件语义，按状态过滤时隐含只返回文件。
+            filters.append(KnowledgeFile.is_folder.is_(False))
+            filters.append(status_condition)
+
+        return filters
+
+    async def count_children_by_parent_ids(self, *, kb_id: str, parent_ids: list[str]) -> dict[str, int]:
+        if not parent_ids:
+            return {}
+
+        async with pg_manager.get_async_session_context() as session:
+            result = await session.execute(
+                select(KnowledgeFile.parent_id, func.count())
+                .where(
+                    KnowledgeFile.kb_id == kb_id,
+                    KnowledgeFile.deleted_at.is_(None),
+                    KnowledgeFile.parent_id.in_(parent_ids),
+                )
+                .group_by(KnowledgeFile.parent_id)
+            )
+            return {str(parent_id): int(count or 0) for parent_id, count in result.all() if parent_id}
 
     async def search_files(
         self,
@@ -134,7 +151,7 @@ class KnowledgeFileRepository:
 
         normalized_query = (filename_query or "").strip().lower()
         if normalized_query:
-            escaped_query = normalized_query.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+            escaped_query = self._escape_like_pattern(normalized_query)
             filters.append(func.lower(KnowledgeFile.filename).like(f"%{escaped_query}%", escape="\\"))
 
         normalized_offset = max(int(offset or 0), 0)
@@ -152,47 +169,6 @@ class KnowledgeFileRepository:
             )
             return list(result.scalars().all()), total
 
-    async def get_chunk_sources_by_file_ids(self, *, kb_id: str, file_ids: list[str]) -> dict[str, dict]:
-        """批量读取检索分片的文件来源与总分片数。"""
-        normalized_ids = [file_id for file_id in file_ids if file_id]
-        if not normalized_ids:
-            return {}
-
-        async with pg_manager.get_async_session_context() as session:
-            result = await session.execute(
-                select(
-                    KnowledgeFile.file_id,
-                    KnowledgeFile.filename,
-                    KnowledgeFile.chunk_count,
-                    KnowledgeFile.active_generation,
-                ).where(
-                    KnowledgeFile.kb_id == kb_id,
-                    KnowledgeFile.deleted_at.is_(None),
-                    KnowledgeFile.file_id.in_(normalized_ids),
-                )
-            )
-            return {
-                str(file_id): {
-                    "source": str(filename or ""),
-                    "chunk_count": int(chunk_count or 0),
-                    "active_generation": int(active_generation or 1),
-                }
-                for file_id, filename, chunk_count, active_generation in result.all()
-            }
-
-    async def list_children(self, *, kb_id: str, parent_id: str | None) -> list[KnowledgeFile]:
-        async with pg_manager.get_async_session_context() as session:
-            result = await session.execute(
-                select(KnowledgeFile)
-                .where(
-                    KnowledgeFile.kb_id == kb_id,
-                    KnowledgeFile.deleted_at.is_(None),
-                    self._parent_condition(parent_id),
-                )
-                .order_by(KnowledgeFile.is_folder.desc(), func.lower(KnowledgeFile.filename).asc())
-            )
-            return list(result.scalars().all())
-
     async def list_file_ids_by_filename_contains(
         self,
         *,
@@ -204,7 +180,7 @@ class KnowledgeFileRepository:
         if not normalized_pattern:
             return []
 
-        escaped_pattern = normalized_pattern.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        escaped_pattern = self._escape_like_pattern(normalized_pattern)
 
         async with pg_manager.get_async_session_context() as session:
             result = await session.execute(
@@ -220,10 +196,10 @@ class KnowledgeFileRepository:
             )
             return [str(file_id) for file_id in result.scalars().all()]
 
-    async def count_all(self) -> int:
-        async with pg_manager.get_async_session_context() as session:
-            result = await session.execute(select(func.count()).select_from(KnowledgeFile).where(KnowledgeFile.deleted_at.is_(None)))
-            return int(result.scalar() or 0)
+    @staticmethod
+    def _escape_like_pattern(value: str) -> str:
+        """转义 LIKE 通配符；反斜杠必须最先转义，供 escape="\\" 的模糊匹配复用。"""
+        return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
 
     async def list_file_ids_by_exact_statuses(
         self,
@@ -271,96 +247,74 @@ class KnowledgeFileRepository:
                 parent_id = node.file_id
         return False
 
-    @staticmethod
-    def _status_condition(status: str | None):
-        values = status_filter_values(status)
-        return KnowledgeFile.status.in_(values) if values else None
-
-    @staticmethod
-    def _parent_condition(parent_id: str | None):
-        if parent_id:
-            return KnowledgeFile.parent_id == parent_id
-        return KnowledgeFile.parent_id.is_(None)
-
-    def _document_filters(
-        self,
-        *,
-        kb_id: str,
-        parent_id: str | None,
-        status: str | None,
-        recursive: bool,
-        files_only: bool,
-    ) -> list:
-        filters = [KnowledgeFile.kb_id == kb_id, KnowledgeFile.deleted_at.is_(None)]
-        if not recursive:
-            filters.append(self._parent_condition(parent_id))
-        if files_only:
-            filters.append(KnowledgeFile.is_folder.is_(False))
-
-        status_condition = self._status_condition(status)
-        if status_condition is not None:
-            filters.append(KnowledgeFile.is_folder.is_(False))
-            filters.append(status_condition)
-
-        return filters
-
-    async def list_documents(
-        self,
-        *,
-        kb_id: str,
-        parent_id: str | None = None,
-        status: str | None = None,
-        page: int = 1,
-        page_size: int = 100,
-        recursive: bool = False,
-        files_only: bool = False,
-    ) -> tuple[list[KnowledgeFile], int]:
-        page = max(int(page or 1), 1)
-        page_size = min(max(int(page_size or 100), 1), 500)
-        offset = (page - 1) * page_size
-        has_status_filter = self._status_condition(status) is not None
-        effective_recursive = recursive and has_status_filter
-        filters = self._document_filters(
-            kb_id=kb_id,
-            parent_id=parent_id,
-            status=status,
-            recursive=effective_recursive,
-            files_only=files_only,
-        )
-
+    async def list_active_generations(self, kb_id: str) -> list[tuple[str, int]]:
+        """只读取可见文件的 active 代次，供向量库在截取 top-k 前过滤。"""
         async with pg_manager.get_async_session_context() as session:
-            total_result = await session.execute(select(func.count()).select_from(KnowledgeFile).where(*filters))
-            total = int(total_result.scalar_one() or 0)
-
-            result = await session.execute(
-                select(KnowledgeFile)
-                .where(*filters)
-                .order_by(
-                    KnowledgeFile.is_folder.desc(),
-                    func.lower(KnowledgeFile.filename).asc(),
-                    KnowledgeFile.created_at.desc(),
-                    KnowledgeFile.file_id.asc(),
+            rows = await session.execute(
+                select(KnowledgeFile.file_id, KnowledgeFile.active_generation)
+                .join(KnowledgeBase, KnowledgeBase.kb_id == KnowledgeFile.kb_id)
+                .where(
+                    KnowledgeFile.kb_id == kb_id,
+                    KnowledgeFile.deleted_at.is_(None),
+                    KnowledgeBase.deleted_at.is_(None),
+                    KnowledgeFile.is_folder.is_(False),
                 )
-                .offset(offset)
-                .limit(page_size)
             )
-            return list(result.scalars().all()), total
+            return [(row.file_id, int(row.active_generation)) for row in rows]
 
-    async def count_children_by_parent_ids(self, *, kb_id: str, parent_ids: list[str]) -> dict[str, int]:
-        if not parent_ids:
+    async def get_chunk_sources_by_file_ids(self, *, kb_id: str, file_ids: list[str]) -> dict[str, dict]:
+        """批量读取检索分片的文件来源与总分片数。"""
+        normalized_ids = [file_id for file_id in file_ids if file_id]
+        if not normalized_ids:
             return {}
 
         async with pg_manager.get_async_session_context() as session:
             result = await session.execute(
-                select(KnowledgeFile.parent_id, func.count())
-                .where(
+                select(
+                    KnowledgeFile.file_id,
+                    KnowledgeFile.filename,
+                    KnowledgeFile.chunk_count,
+                    KnowledgeFile.active_generation,
+                ).where(
                     KnowledgeFile.kb_id == kb_id,
                     KnowledgeFile.deleted_at.is_(None),
-                    KnowledgeFile.parent_id.in_(parent_ids),
+                    KnowledgeFile.file_id.in_(normalized_ids),
                 )
-                .group_by(KnowledgeFile.parent_id)
             )
-            return {str(parent_id): int(count or 0) for parent_id, count in result.all() if parent_id}
+            return {
+                str(file_id): {
+                    "source": str(filename or ""),
+                    "chunk_count": int(chunk_count or 0),
+                    "active_generation": int(active_generation or 1),
+                }
+                for file_id, filename, chunk_count, active_generation in result.all()
+            }
+
+    async def count_all(self) -> int:
+        async with pg_manager.get_async_session_context() as session:
+            result = await session.execute(select(func.count()).select_from(KnowledgeFile).where(KnowledgeFile.deleted_at.is_(None)))
+            return int(result.scalar() or 0)
+
+    async def aggregate_dashboard_stats(self) -> list[tuple[str, int, int, int]]:
+        """按文件类型聚合真实文件数、大小与 Chunk 数。"""
+        async with pg_manager.get_async_session_context() as session:
+            result = await session.execute(
+                select(
+                    KnowledgeFile.file_type,
+                    func.count(KnowledgeFile.file_id),
+                    func.coalesce(func.sum(KnowledgeFile.file_size), 0),
+                    func.coalesce(func.sum(KnowledgeFile.chunk_count), 0),
+                )
+                .where(
+                    KnowledgeFile.deleted_at.is_(None),
+                    or_(KnowledgeFile.is_folder.is_(False), KnowledgeFile.is_folder.is_(None)),
+                )
+                .group_by(KnowledgeFile.file_type)
+            )
+            return [
+                (str(file_type or "unknown"), int(count or 0), int(size or 0), int(nodes or 0))
+                for file_type, count, size, nodes in result.all()
+            ]
 
     async def get_kb_file_stats(self, kb_id: str) -> dict[str, Any]:
         """从 PostgreSQL 读取当前统计，避免文件提交后列表仍引用旧缓存。"""
@@ -402,17 +356,49 @@ class KnowledgeFileRepository:
             "file_status_counts": counts,
         }
 
+    _writable_fields = {
+        "kb_id",
+        "parent_id",
+        "filename",
+        "original_filename",
+        "file_type",
+        "path",
+        "minio_url",
+        "markdown_file",
+        "status",
+        "content_hash",
+        "file_size",
+        "chunk_count",
+        "token_count",
+        "content_type",
+        "processing_params",
+        "is_folder",
+        "error_message",
+        "processing_job_id",
+        "processing_owner",
+        "created_by",
+        "updated_by",
+        "generation",
+        "active_generation",
+        "building_generation",
+        "deleted_at",
+        "projection_status",
+        "projection_error",
+    }
+
+    @classmethod
+    def _sanitize_data(cls, data: dict[str, Any]) -> dict[str, Any]:
+        sanitized = {key: value for key, value in data.items() if key in cls._writable_fields}
+        if sanitized:
+            sanitized["updated_at"] = utc_now()
+        return sanitized
+
     async def upsert(self, file_id: str, data: dict[str, Any]) -> KnowledgeFile:
         """写入文件事实。"""
         sanitized_data = self._sanitize_data(data)
         async with pg_manager.get_async_session_context() as session:
-            kb = await session.scalar(
-                select(KnowledgeBase)
-                .where(
-                    KnowledgeBase.kb_id == sanitized_data["kb_id"],
-                )
-                .with_for_update()
-            )
+            # 先锁知识库再锁文件，与 fail_job_processing_in_session 保持同一 KB → File 锁序。
+            kb = await session.scalar(select(KnowledgeBase).where(KnowledgeBase.kb_id == sanitized_data["kb_id"]).with_for_update())
             if kb is None or kb.deleted_at is not None:
                 raise ValueError("Knowledge base not found or deleted")
             result = await session.execute(select(KnowledgeFile).where(KnowledgeFile.file_id == file_id).with_for_update())
@@ -420,11 +406,10 @@ class KnowledgeFileRepository:
             if record is None:
                 record = KnowledgeFile(file_id=file_id, **sanitized_data)
                 session.add(record)
-                await session.flush()
             else:
                 for key, value in sanitized_data.items():
                     setattr(record, key, value)
-                await session.flush()
+            await session.flush()
 
             return record
 
@@ -451,6 +436,59 @@ class KnowledgeFileRepository:
             for key, value in sanitized_data.items():
                 setattr(record, key, value)
             return record
+
+    async def update_fields_if_status(
+        self,
+        *,
+        kb_id: str,
+        file_id: str,
+        allowed_statuses: set[str],
+        data: dict[str, Any],
+        processing_job_id: str | None = None,
+        processing_owner: str | None = None,
+    ) -> KnowledgeFile | None:
+        lease_job_id = processing_job_id or data.get("processing_job_id")
+        lease_owner = processing_owner or data.get("processing_owner")
+        sanitized_data = self._sanitize_data(data)
+        if not sanitized_data:
+            return await self.get_by_file_id(file_id)
+
+        filters = [
+            KnowledgeFile.kb_id == kb_id,
+            KnowledgeFile.file_id == file_id,
+            KnowledgeFile.status.in_(sorted(allowed_statuses)),
+        ]
+        if processing_job_id is not None:
+            filters.append(KnowledgeFile.processing_job_id == processing_job_id)
+        if processing_owner is not None:
+            filters.append(KnowledgeFile.processing_owner == processing_owner)
+        async with pg_manager.get_async_session_context() as session:
+            if lease_job_id is not None and lease_owner is not None:
+                # 带租约的更新先锁作业行并确认租约仍存活，过期 worker 的晚写在此被拒绝。
+                job_record = await session.scalar(
+                    select(BackgroundJobRecord)
+                    .where(
+                        BackgroundJobRecord.id == lease_job_id,
+                        BackgroundJobRecord.status == "running",
+                        BackgroundJobRecord.worker_id == lease_owner,
+                    )
+                    .with_for_update()
+                )
+                if job_record is None:
+                    return None
+                file_record = await session.scalar(select(KnowledgeFile).where(*filters).with_for_update())
+                if file_record is None:
+                    return None
+                database_now = await session.scalar(select(func.clock_timestamp()))
+                if job_record.lease_expires_at is None or job_record.lease_expires_at <= database_now:
+                    return None
+                for key, value in sanitized_data.items():
+                    setattr(file_record, key, value)
+                await session.flush()
+                return file_record
+
+            result = await session.execute(update(KnowledgeFile).where(*filters).values(**sanitized_data).returning(KnowledgeFile))
+            return result.scalar_one_or_none()
 
     async def begin_index_generation(
         self, *, kb_id: str, file_id: str, processing_job_id: str | None = None, processing_owner: str | None = None
@@ -520,7 +558,7 @@ class KnowledgeFileRepository:
         )
         if record is None or record.deleted_at is not None:
             raise ValueError(f"File {file_id} not found or deleted")
-        if record.status != "indexing" or (record.processing_job_id, record.processing_owner) != (
+        if record.status != FileStatus.INDEXING or (record.processing_job_id, record.processing_owner) != (
             processing_job_id,
             processing_owner,
         ):
@@ -540,64 +578,13 @@ class KnowledgeFileRepository:
             )
         )
 
-    async def update_fields_if_status(
-        self,
-        *,
-        kb_id: str,
-        file_id: str,
-        allowed_statuses: set[str],
-        data: dict[str, Any],
-        processing_job_id: str | None = None,
-        processing_owner: str | None = None,
-    ) -> KnowledgeFile | None:
-        lease_job_id = processing_job_id or data.get("processing_job_id")
-        lease_owner = processing_owner or data.get("processing_owner")
-        sanitized_data = self._sanitize_data(data)
-        if not sanitized_data:
-            return await self.get_by_file_id(file_id)
-
-        filters = [
-            KnowledgeFile.kb_id == kb_id,
-            KnowledgeFile.file_id == file_id,
-            KnowledgeFile.status.in_(sorted(allowed_statuses)),
-        ]
-        if processing_job_id is not None:
-            filters.append(KnowledgeFile.processing_job_id == processing_job_id)
-        if processing_owner is not None:
-            filters.append(KnowledgeFile.processing_owner == processing_owner)
-        async with pg_manager.get_async_session_context() as session:
-            if lease_job_id is not None and lease_owner is not None:
-                job_record = await session.scalar(
-                    select(BackgroundJobRecord)
-                    .where(
-                        BackgroundJobRecord.id == lease_job_id,
-                        BackgroundJobRecord.status == "running",
-                        BackgroundJobRecord.worker_id == lease_owner,
-                    )
-                    .with_for_update()
-                )
-                if job_record is None:
-                    return None
-                file_record = await session.scalar(select(KnowledgeFile).where(*filters).with_for_update())
-                if file_record is None:
-                    return None
-                database_now = await session.scalar(select(func.clock_timestamp()))
-                if job_record.lease_expires_at is None or job_record.lease_expires_at <= database_now:
-                    return None
-                for key, value in sanitized_data.items():
-                    setattr(file_record, key, value)
-                await session.flush()
-                return file_record
-
-            result = await session.execute(update(KnowledgeFile).where(*filters).values(**sanitized_data).returning(KnowledgeFile))
-            return result.scalar_one_or_none()
-
     @staticmethod
     async def fail_job_processing_in_session(session, *, job_id: str, error: str) -> int:
         """同事务收敛指定作业拥有的文件中间态与知识库统计。"""
+        in_flight_statuses = [FileStatus.PARSING, FileStatus.INDEXING]
         owned_files = select(KnowledgeFile.kb_id).where(
             KnowledgeFile.processing_job_id == job_id,
-            KnowledgeFile.status.in_(["parsing", "indexing"]),
+            KnowledgeFile.status.in_(in_flight_statuses),
         )
         # 与文件写入保持 KB → File 锁序，统计在持有 KB 行锁后重新聚合。
         kb_result = await session.scalars(
@@ -612,12 +599,12 @@ class KnowledgeFileRepository:
             update(KnowledgeFile)
             .where(
                 KnowledgeFile.processing_job_id == job_id,
-                KnowledgeFile.status.in_(["parsing", "indexing"]),
+                KnowledgeFile.status.in_(in_flight_statuses),
             )
             .values(
                 status=case(
-                    (KnowledgeFile.status == "parsing", "error_parsing"),
-                    else_="error_indexing",
+                    (KnowledgeFile.status == FileStatus.PARSING, FileStatus.ERROR_PARSING),
+                    else_=FileStatus.ERROR_INDEXING,
                 ),
                 error_message=error,
                 processing_job_id=None,

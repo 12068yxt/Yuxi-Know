@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from sqlalchemy import delete, func, or_, select
 
@@ -8,25 +8,45 @@ from yuxi.infrastructure.postgres.manager import pg_manager
 from yuxi.modules.knowledge.models import EvaluationDataset, EvaluationDatasetItem, EvaluationRun, EvaluationRunItem
 from yuxi.shared.datetime import utc_now
 
+if TYPE_CHECKING:
+    from sqlalchemy.ext.asyncio import AsyncSession
+
+    from yuxi.modules.background_jobs.models import BackgroundJobRecord
+
 
 class EvaluationRepository:
+    """评估数据集与运行记录的 PG 持久化仓储。
+
+    *_in_session 方法运行在调用方（service / BackgroundJob 事务）拥有的会话内，
+    其余方法自开短事务；更新前用 with_for_update 取行锁串行化并发终态写入。
+    """
+
+    # ─── 数据集写入 ───────────────────────────────────────────────
+
     @staticmethod
-    async def create_dataset_in_session(session, dataset_data: dict[str, Any]) -> EvaluationDataset:
-        """在 service 拥有的事务中创建数据集。"""
+    async def create_dataset_in_session(session: AsyncSession, dataset_data: dict[str, Any]) -> EvaluationDataset:
+        """在调用方事务中创建数据集。"""
         dataset = EvaluationDataset(**dataset_data)
         session.add(dataset)
         await session.flush()
         return dataset
 
     async def create_dataset_with_items(self, dataset_data: dict[str, Any], items_data: list[dict[str, Any]]) -> EvaluationDataset:
+        """同一事务内写入数据集与全部题目，保证二者原子可见。"""
         async with pg_manager.get_async_session_context() as session:
             dataset = await self.create_dataset_in_session(session, dataset_data)
             await self.add_dataset_items_in_session(session, items_data)
             return dataset
 
     @staticmethod
+    async def add_dataset_items_in_session(session: AsyncSession, items_data: list[dict[str, Any]]) -> None:
+        """在调用方事务中批量写入数据集题目。"""
+        session.add_all(EvaluationDatasetItem(**item) for item in items_data)
+        await session.flush()
+
+    @staticmethod
     async def attach_dataset_generation_job_in_session(
-        session,
+        session: AsyncSession,
         dataset_id: str,
         job_id: str,
     ) -> EvaluationDataset | None:
@@ -50,7 +70,8 @@ class EvaluationRepository:
         return record
 
     @staticmethod
-    async def update_dataset_in_session(session, dataset_id: str, data: dict[str, Any]) -> EvaluationDataset | None:
+    async def update_dataset_in_session(session: AsyncSession, dataset_id: str, data: dict[str, Any]) -> EvaluationDataset | None:
+        """行锁内更新数据集字段；记录不存在时返回 None。"""
         record = await session.scalar(select(EvaluationDataset).where(EvaluationDataset.dataset_id == dataset_id).with_for_update())
         if record is None:
             return None
@@ -60,20 +81,20 @@ class EvaluationRepository:
         return record
 
     async def update_dataset(self, dataset_id: str, data: dict[str, Any]) -> EvaluationDataset | None:
+        """独立事务内更新数据集字段。"""
         async with pg_manager.get_async_session_context() as session:
             return await self.update_dataset_in_session(session, dataset_id, data)
 
-    @staticmethod
-    async def add_dataset_items_in_session(session, items_data: list[dict[str, Any]]) -> None:
-        session.add_all(EvaluationDatasetItem(**item) for item in items_data)
-        await session.flush()
+    # ─── 数据集查询 ───────────────────────────────────────────────
 
     async def get_dataset(self, dataset_id: str) -> EvaluationDataset | None:
+        """按 dataset_id 读取数据集。"""
         async with pg_manager.get_async_session_context() as session:
             result = await session.execute(select(EvaluationDataset).where(EvaluationDataset.dataset_id == dataset_id))
             return result.scalar_one_or_none()
 
     async def list_datasets(self, kb_id: str) -> list[EvaluationDataset]:
+        """列出知识库的数据集，按创建时间倒序。"""
         async with pg_manager.get_async_session_context() as session:
             result = await session.execute(
                 select(EvaluationDataset).where(EvaluationDataset.kb_id == kb_id).order_by(EvaluationDataset.created_at.desc())
@@ -81,6 +102,7 @@ class EvaluationRepository:
             return list(result.scalars().all())
 
     async def list_dataset_items(self, dataset_id: str, offset: int = 0, limit: int = 100) -> list[EvaluationDatasetItem]:
+        """按 item_index 升序分页读取数据集题目，分页顺序是稳定契约。"""
         async with pg_manager.get_async_session_context() as session:
             result = await session.execute(
                 select(EvaluationDatasetItem)
@@ -92,6 +114,7 @@ class EvaluationRepository:
             return list(result.scalars().all())
 
     async def count_dataset_items(self, dataset_id: str) -> int:
+        """统计数据集题目总数，与分页列表同表同过滤口径。"""
         async with pg_manager.get_async_session_context() as session:
             result = await session.execute(
                 select(func.count(EvaluationDatasetItem.id)).where(EvaluationDatasetItem.dataset_id == dataset_id)
@@ -99,6 +122,7 @@ class EvaluationRepository:
             return int(result.scalar() or 0)
 
     async def list_all_dataset_items(self, dataset_id: str) -> list[EvaluationDatasetItem]:
+        """按 item_index 升序读取全部题目，供评估执行与 JSONL 导出复用。"""
         async with pg_manager.get_async_session_context() as session:
             result = await session.execute(
                 select(EvaluationDatasetItem)
@@ -107,35 +131,19 @@ class EvaluationRepository:
             )
             return list(result.scalars().all())
 
-    async def delete_dataset(self, dataset_id: str) -> None:
-        async with pg_manager.get_async_session_context() as session:
-            result = await session.execute(select(EvaluationDataset).where(EvaluationDataset.dataset_id == dataset_id))
-            record = result.scalar_one_or_none()
-            if record is not None:
-                await session.delete(record)
+    # ─── 评估运行写入 ─────────────────────────────────────────────
 
     @staticmethod
-    async def create_run_in_session(session, data: dict[str, Any]) -> EvaluationRun:
-        """在 service 拥有的事务中创建评估 Run。"""
+    async def create_run_in_session(session: AsyncSession, data: dict[str, Any]) -> EvaluationRun:
+        """在调用方事务中创建评估 Run。"""
         run = EvaluationRun(**data)
         session.add(run)
         await session.flush()
         return run
 
-    async def get_run(self, run_id: str) -> EvaluationRun | None:
-        async with pg_manager.get_async_session_context() as session:
-            result = await session.execute(select(EvaluationRun).where(EvaluationRun.run_id == run_id))
-            return result.scalar_one_or_none()
-
-    async def list_runs(self, kb_id: str) -> list[EvaluationRun]:
-        async with pg_manager.get_async_session_context() as session:
-            result = await session.execute(
-                select(EvaluationRun).where(EvaluationRun.kb_id == kb_id).order_by(EvaluationRun.started_at.desc())
-            )
-            return list(result.scalars().all())
-
     @staticmethod
-    async def update_run_in_session(session, run_id: str, data: dict[str, Any]) -> EvaluationRun | None:
+    async def update_run_in_session(session: AsyncSession, run_id: str, data: dict[str, Any]) -> EvaluationRun | None:
+        """行锁内更新评估 Run 字段；记录不存在时返回 None。"""
         record = await session.scalar(select(EvaluationRun).where(EvaluationRun.run_id == run_id).with_for_update())
         if record is None:
             return None
@@ -145,25 +153,38 @@ class EvaluationRepository:
         return record
 
     async def update_run(self, run_id: str, data: dict[str, Any]) -> EvaluationRun | None:
+        """独立事务内更新评估 Run 字段。"""
         async with pg_manager.get_async_session_context() as session:
             return await self.update_run_in_session(session, run_id, data)
 
-    async def delete_run(self, run_id: str) -> None:
+    # ─── 评估运行查询 ─────────────────────────────────────────────
+
+    async def get_run(self, run_id: str) -> EvaluationRun | None:
+        """按 run_id 读取评估 Run。"""
         async with pg_manager.get_async_session_context() as session:
-            await session.execute(delete(EvaluationRunItem).where(EvaluationRunItem.run_id == run_id))
             result = await session.execute(select(EvaluationRun).where(EvaluationRun.run_id == run_id))
-            record = result.scalar_one_or_none()
-            if record is not None:
-                await session.delete(record)
+            return result.scalar_one_or_none()
+
+    async def list_runs(self, kb_id: str) -> list[EvaluationRun]:
+        """列出知识库的评估运行，按开始时间倒序。"""
+        async with pg_manager.get_async_session_context() as session:
+            result = await session.execute(
+                select(EvaluationRun).where(EvaluationRun.kb_id == kb_id).order_by(EvaluationRun.started_at.desc())
+            )
+            return list(result.scalars().all())
+
+    # ─── 运行结果：逐题写入与筛选读取 ─────────────────────────────
 
     @staticmethod
     async def upsert_run_item_in_session(
-        session,
+        session: AsyncSession,
         run_id: str,
         item_index: int,
         data: dict[str, Any],
     ) -> EvaluationRunItem:
         """绑定父运行的数据集；不能把其他数据集的题目写入当前结果。"""
+        # MATCH FULL 复合外键要求 dataset_item_id 与 dataset_id 同时有值或同时为空：
+        # 关联原题时从父 Run 继承 dataset_id，显式清空原题引用时同步清空 dataset_id。
         data = dict(data)
         if data.get("dataset_item_id") is not None:
             run = await session.scalar(select(EvaluationRun).where(EvaluationRun.run_id == run_id).with_for_update())
@@ -189,6 +210,7 @@ class EvaluationRepository:
     async def list_run_items(
         self, run_id: str, offset: int = 0, limit: int = 100, *, result_filter: str = "all"
     ) -> list[EvaluationRunItem]:
+        """按 item_index 升序分页读取逐题结果，结果筛选在 SQL 内执行后再分页。"""
         async with pg_manager.get_async_session_context() as session:
             result = await session.execute(
                 select(EvaluationRunItem)
@@ -200,18 +222,12 @@ class EvaluationRepository:
             return list(result.scalars().all())
 
     async def count_run_items(self, run_id: str, *, result_filter: str = "all") -> int:
+        """按与 list_run_items 相同的筛选口径统计逐题结果数。"""
         async with pg_manager.get_async_session_context() as session:
             result = await session.execute(
                 select(func.count(EvaluationRunItem.id)).where(EvaluationRunItem.run_id == run_id, *self._result_filters(result_filter))
             )
             return int(result.scalar() or 0)
-
-    async def delete_all(self) -> None:
-        async with pg_manager.get_async_session_context() as session:
-            await session.execute(delete(EvaluationRunItem))
-            await session.execute(delete(EvaluationRun))
-            await session.execute(delete(EvaluationDatasetItem))
-            await session.execute(delete(EvaluationDataset))
 
     @staticmethod
     def _result_filters(result_filter: str) -> list:
@@ -223,8 +239,32 @@ class EvaluationRepository:
             return [answer_error]
         return [or_(answer_error, func.coalesce(EvaluationRunItem.metrics["recall@10"].as_float(), 1.0) < 1)]
 
+    # ─── 删除 ─────────────────────────────────────────────────────
 
-async def finish_dataset_generation_job(session, job_record, result) -> None:
+    async def delete_dataset(self, dataset_id: str) -> None:
+        """删除数据集；题目由数据库外键级联清理。"""
+        async with pg_manager.get_async_session_context() as session:
+            result = await session.execute(select(EvaluationDataset).where(EvaluationDataset.dataset_id == dataset_id))
+            record = result.scalar_one_or_none()
+            if record is not None:
+                await session.delete(record)
+
+    async def delete_run(self, run_id: str) -> None:
+        """删除评估 Run 及其全部逐题结果。"""
+        async with pg_manager.get_async_session_context() as session:
+            await session.execute(delete(EvaluationRunItem).where(EvaluationRunItem.run_id == run_id))
+            result = await session.execute(select(EvaluationRun).where(EvaluationRun.run_id == run_id))
+            record = result.scalar_one_or_none()
+            if record is not None:
+                await session.delete(record)
+
+
+# ─── BackgroundJob 终态钩子 ────────────────────────────────────────
+# 四个钩子经 evaluation/service.py re-export 后由 background_jobs registry
+# 按字符串路径加载：模块路径与函数名是注册契约，不可重命名。
+
+
+async def finish_dataset_generation_job(session: AsyncSession, job_record: BackgroundJobRecord, result: Any) -> None:
     """在 BackgroundJob 成功事务内提交数据集完成事实。"""
     if not isinstance(result, dict) or result.get("dataset_id") != (job_record.payload or {}).get("dataset_id"):
         raise ValueError("Dataset generation result does not match BackgroundJob payload")
@@ -235,7 +275,7 @@ async def finish_dataset_generation_job(session, job_record, result) -> None:
     dataset.build_metadata = dict(result["build_metadata"])
 
 
-async def fail_dataset_generation_job(session, job_record, error: str) -> None:
+async def fail_dataset_generation_job(session: AsyncSession, job_record: BackgroundJobRecord, error: str) -> None:
     """在 BackgroundJob 失败事务内收敛数据集构建状态。"""
     dataset_id = (job_record.payload or {}).get("dataset_id")
     dataset = await session.scalar(select(EvaluationDataset).where(EvaluationDataset.dataset_id == dataset_id).with_for_update())
@@ -254,7 +294,7 @@ async def fail_dataset_generation_job(session, job_record, error: str) -> None:
     dataset.build_metadata = metadata
 
 
-async def finish_rag_evaluation_job(session, job_record, result) -> None:
+async def finish_rag_evaluation_job(session: AsyncSession, job_record: BackgroundJobRecord, result: Any) -> None:
     """在 BackgroundJob 成功事务内提交评估 Run 完成事实。"""
     if not isinstance(result, dict) or result.get("run_id") != (job_record.payload or {}).get("run_id"):
         raise ValueError("Evaluation result does not match BackgroundJob payload")
@@ -268,7 +308,7 @@ async def finish_rag_evaluation_job(session, job_record, result) -> None:
     run.completed_at = utc_now()
 
 
-async def fail_rag_evaluation_job(session, job_record, error: str) -> None:
+async def fail_rag_evaluation_job(session: AsyncSession, job_record: BackgroundJobRecord, error: str) -> None:
     """在 BackgroundJob 失败事务内收敛评估 Run。"""
     run_id = (job_record.payload or {}).get("run_id")
     run = await session.scalar(select(EvaluationRun).where(EvaluationRun.run_id == run_id).with_for_update())

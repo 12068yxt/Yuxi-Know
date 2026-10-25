@@ -1,3 +1,5 @@
+"""知识库上传、处理参数与图片代理 URL 的无状态共享工具。"""
+
 import hashlib
 from urllib.parse import quote, unquote, urlsplit
 from uuid import uuid4
@@ -32,6 +34,11 @@ def sanitize_processing_params(params: dict | None) -> dict | None:
     return {key: value for key, value in params.items() if key not in _DROPPED_PROCESSING_PARAM_KEYS}
 
 
+async def calculate_content_hash(data: bytes | bytearray) -> str:
+    """计算文件内容的 SHA-256 哈希值。"""
+    return hashlib.sha256(data).hexdigest()
+
+
 def params_for_uploaded_document(item: str, params: dict) -> dict:
     """将批量上传参数收敛为单个文档的处理参数。"""
     source_paths = params.get("source_paths")
@@ -42,13 +49,81 @@ def params_for_uploaded_document(item: str, params: dict) -> dict:
     return item_params
 
 
+async def prepare_item_metadata(item: str, content_type: str, kb_id: str, params: dict | None = None) -> dict:
+    """准备 MinIO 文件元数据；URL 导入需先通过 fetch-url 预处理为 MinIO 文件。"""
+    # URL 转 HTML 文件的预处理信息携带原始文件名、对象路径与内容指纹。
+    if params and PREPROCESSED_UPLOADS_KEY in params and item in params[PREPROCESSED_UPLOADS_KEY]:
+        pre_info = params[PREPROCESSED_UPLOADS_KEY][item]
+        filename = pre_info.get("filename", item)  # 通常是原始 URL
+
+        source_url = urlsplit(filename)
+        title = unquote(source_url.path.rsplit("/", 1)[-1]) or source_url.hostname or "page"
+        # 标题截断后追加 ".html"，保证仍落在 normalize_name 的名称长度上限内。
+        filename_display = normalize_name(title[:480] + ".html")
+
+        safe_params = sanitize_processing_params(params) or {}
+        # 后续解析必须走文件流程（MinIO 下载 -> HTML 解析），不能再次当作 URL 抓取。
+        safe_params["content_type"] = "file"
+        # 完整 URL 保存到 JSON 字段，避免数据库字段长度限制。
+        safe_params["original_source"] = filename
+
+        return {
+            "kb_id": kb_id,
+            "filename": filename_display,
+            "path": pre_info["path"],
+            "file_type": "html",
+            "status": "indexing",
+            "created_at": utc_isoformat(),
+            "file_id": f"file_{uuid4().hex}",
+            "content_hash": pre_info["content_hash"],
+            "size": pre_info.get("file_size"),
+            "parent_id": params.get("parent_id"),
+            "processing_params": safe_params,
+        }
+
+    if content_type != "file":
+        raise ValueError(f"Unsupported content_type: {content_type}")
+    if not is_minio_url(item):
+        raise ValueError(f"File source must be a MinIO URL: {item}")
+
+    logger.debug(f"Processing MinIO file: {item}")
+    _, object_name = parse_minio_url(item)
+    filename = object_name.rsplit("/", 1)[-1]
+
+    filename_display = normalize_name(filename)
+    file_type = filename_display.rsplit(".", 1)[-1].lower() if "." in filename_display else ""
+
+    # 内容指纹按上传清单逐对象携带；缺失即拒绝，通过后 params 必为非空，后续可直接读取。
+    content_hash = None
+    if params and "content_hashes" in params and isinstance(params["content_hashes"], dict):
+        content_hash = params["content_hashes"].get(item)
+    if not content_hash:
+        raise ValueError(f"Missing content_hash for file: {item}")
+
+    file_sizes = params.get("file_sizes")
+    file_size = file_sizes.get(item) if isinstance(file_sizes, dict) else None
+
+    return {
+        "kb_id": kb_id,
+        "filename": filename_display,
+        "path": item,
+        "file_type": file_type,
+        "status": "indexing",
+        "created_at": utc_isoformat(),
+        "file_id": f"file_{uuid4().hex}",
+        "content_hash": content_hash,
+        "size": file_size,
+        "parent_id": params.get("parent_id"),
+        "processing_params": sanitize_processing_params(params),
+    }
+
+
 def resolve_processing_params(
     kb_additional_params: dict | None,
     file_processing_params: dict | None,
     request_params: dict | None = None,
 ) -> dict:
-    """合并文件、请求中的 OCR 和分块参数。"""
-
+    """合并文件与请求中的处理参数；分块参数按 KB 配置解析并覆盖同名键。"""
     merged_params = sanitize_processing_params(merge_processing_params(file_processing_params, request_params)) or {}
     chunk_params = resolve_chunk_processing_params(
         kb_additional_params=kb_additional_params,
@@ -59,129 +134,9 @@ def resolve_processing_params(
     return merged_params
 
 
-async def calculate_content_hash(data: bytes | bytearray) -> str:
-    """计算文件内容的 SHA-256 哈希值。"""
-    sha256 = hashlib.sha256()
-    sha256.update(data)
-    return sha256.hexdigest()
-
-
-async def prepare_item_metadata(item: str, content_type: str, kb_id: str, params: dict | None = None) -> dict:
-    """
-    准备 MinIO 文件元数据；URL 导入需先通过 fetch-url 预处理为 MinIO 文件。
-
-    Args:
-        item: MinIO URL
-        content_type: 内容类型，目前仅支持 "file"
-        kb_id: 知识库ID
-        params: 处理参数，可选
-    """
-    # 检查是否有预处理信息 (针对 URL 转 HTML 文件的情况)
-    if params and PREPROCESSED_UPLOADS_KEY in params and item in params[PREPROCESSED_UPLOADS_KEY]:
-        pre_info = params[PREPROCESSED_UPLOADS_KEY][item]
-
-        # 使用预处理信息
-        filename = pre_info.get("filename", item)  # 通常是原始 URL
-
-        source_url = urlsplit(filename)
-        title = unquote(source_url.path.rsplit("/", 1)[-1]) or source_url.hostname or "page"
-        filename_display = normalize_name(title[:480] + ".html")
-        file_type = "html"
-        item_path = pre_info["path"]
-        content_hash = pre_info["content_hash"]
-        file_id = f"file_{uuid4().hex}"
-
-        metadata = {
-            "kb_id": kb_id,
-            "filename": filename_display,
-            "path": item_path,
-            "file_type": file_type,
-            "status": "indexing",
-            "created_at": utc_isoformat(),
-            "file_id": file_id,
-            "content_hash": content_hash,
-            "size": pre_info.get("file_size"),
-            "parent_id": params.get("parent_id"),
-        }
-
-        if params:
-            safe_params = sanitize_processing_params(params) or {}
-            # 覆盖 content_type 为 file，确保后续解析走文件流程（MinIO 下载 -> HTML 解析）
-            # 而不是再次尝试作为 URL 抓取
-            safe_params["content_type"] = "file"
-            safe_params["original_source"] = filename  # 保存完整 URL 到 JSON 字段，避免数据库字段长度限制
-            metadata["processing_params"] = safe_params
-
-        return metadata
-
-    if content_type == "file":
-        if not is_minio_url(item):
-            raise ValueError(f"File source must be a MinIO URL: {item}")
-
-        logger.debug(f"Processing MinIO file: {item}")
-        _, object_name = parse_minio_url(item)
-        filename = object_name.rsplit("/", 1)[-1]
-
-        filename_display = normalize_name(filename)
-        file_type = filename_display.rsplit(".", 1)[-1].lower() if "." in filename_display else ""
-        item_path = item
-
-        content_hash = None
-        if params and "content_hashes" in params and isinstance(params["content_hashes"], dict):
-            content_hash = params["content_hashes"].get(item)
-
-        if not content_hash:
-            raise ValueError(f"Missing content_hash for file: {item}")
-
-        file_sizes = params.get("file_sizes") if params else None
-        if not isinstance(file_sizes, dict):
-            file_sizes = {}
-        file_size = file_sizes.get(item)
-        file_id = f"file_{uuid4().hex}"
-
-    else:
-        raise ValueError(f"Unsupported content_type: {content_type}")
-
-    metadata = {
-        "kb_id": kb_id,
-        "filename": filename_display,  # 使用显示用的文件名
-        "path": item_path,
-        "file_type": file_type,
-        "status": "indexing",
-        "created_at": utc_isoformat(),
-        "file_id": file_id,
-        "content_hash": content_hash,
-        "size": file_size,
-        "parent_id": params.get("parent_id") if params else None,
-    }
-
-    # 保存处理参数到元数据
-    if params:
-        metadata["processing_params"] = sanitize_processing_params(params)
-
-    return metadata
-
-
 def merge_processing_params(metadata_params: dict | None, request_params: dict | None) -> dict:
-    """
-    合并处理参数：优先使用请求参数，缺失时使用元数据中的参数
-
-    Args:
-        metadata_params: 元数据中保存的参数
-        request_params: 请求中提供的参数
-
-    Returns:
-        dict: 合并后的参数
-    """
-    merged_params = {}
-
-    # 首先使用元数据中的参数作为默认值
-    if metadata_params:
-        merged_params.update(metadata_params)
-
-    # 然后使用请求参数覆盖（如果提供）
-    if request_params:
-        merged_params.update(request_params)
+    """合并处理参数，请求参数覆盖元数据中的同名键。"""
+    merged_params = {**(metadata_params or {}), **(request_params or {})}
 
     logger.debug(
         "Merged processing params: "

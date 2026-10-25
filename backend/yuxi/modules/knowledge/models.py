@@ -45,6 +45,7 @@ class KnowledgeBase(Base):
     updated_at = Column(DateTime(timezone=True), default=utc_now, onupdate=utc_now)
 
     __table_args__ = (
+        # 部分唯一索引：未删除知识库的小写名称全局唯一；软删除后名称可被新库复用。
         Index(
             "uq_knowledge_bases_active_name",
             func.lower(name),
@@ -56,10 +57,12 @@ class KnowledgeBase(Base):
 
 
 class KnowledgeFile(Base):
-    """知识文件模型"""
+    """知识文件模型，同时充当目录树节点：is_folder 区分目录，parent_id 构成层级。"""
 
     __tablename__ = "knowledge_files"
     __table_args__ = (
+        # 同一父目录（含 parent_id 为空的根层）内，未删除文件名经 NFC 与小写归一后唯一；
+        # NULLS NOT DISTINCT 让根层同名同样冲突。表达式依赖 PostgreSQL，SQLite 测试库跳过。
         Index(
             "uq_knowledge_files_active_name",
             "kb_id",
@@ -69,14 +72,17 @@ class KnowledgeFile(Base):
             postgresql_nulls_not_distinct=True,
             postgresql_where=text("deleted_at IS NULL"),
         ).ddl_if(dialect="postgresql"),
+        # 未删除行的文件名必须是干净叶子名：无路径分隔符与控制字符、NFC 归一、无首尾空白。
         CheckConstraint(
             "deleted_at IS NOT NULL OR (filename = btrim(filename) AND filename NOT IN ('', '.', '..') "
             "AND strpos(filename, '/') = 0 AND strpos(filename, chr(92)) = 0 "
             "AND filename !~ '[[:cntrl:]]' AND filename = normalize(filename, NFC))",
             name="ck_knowledge_files_leaf_name",
         ).ddl_if(dialect="postgresql"),
+        # file_id 单列唯一支撑子表的单列外键引用；(file_id, kb_id) 复合唯一再钉住两者的绑定。
         UniqueConstraint("file_id", name="uq_knowledge_files_file_id"),
         UniqueConstraint("file_id", "kb_id", name="uq_knowledge_files_file_id_kb"),
+        # 复合外键保证子节点与父节点同属一个知识库；DEFERRED 允许同一事务内以任意顺序写入目录树。
         ForeignKeyConstraint(
             ["parent_id", "kb_id"],
             ["knowledge_files.file_id", "knowledge_files.kb_id"],
@@ -110,10 +116,11 @@ class KnowledgeFile(Base):
     created_by = Column(String(128))
     updated_by = Column(String(128))
     created_at = Column(DateTime(timezone=True), default=utc_now)
-    # generation 是文件事实的单调代次；deleted_at 让删除先在 PostgreSQL 中生效。
+    # generation 是文件事实的单调代次；building_generation 记录在途重建，投影成功后晋升 active_generation。
     generation = Column(Integer, nullable=False, default=1, server_default=text("1"))
     active_generation = Column(Integer, nullable=False, default=1, server_default=text("1"))
     building_generation = Column(Integer)
+    # 软删除先在 PostgreSQL 生效，向量库等外部投影随后异步清理。
     deleted_at = Column(DateTime(timezone=True), index=True)
     projection_status = Column(String(16), nullable=False, default="pending", server_default=text("'pending'"))
     projection_error = Column(Text)
@@ -159,7 +166,7 @@ class KnowledgeProjectionOutbox(Base):
 
 
 class KnowledgeChunk(Base):
-    """知识库 Chunk 模型"""
+    """文件内容的分块投影，按文件代次生成。"""
 
     __tablename__ = "knowledge_chunks"
     __table_args__ = (
@@ -182,6 +189,7 @@ class KnowledgeChunk(Base):
     file_id = Column(String(64), ForeignKey("knowledge_files.file_id", ondelete="CASCADE"), nullable=False)
     kb_id = Column(String(80), ForeignKey("knowledge_bases.kb_id", ondelete="CASCADE"), nullable=False)
     chunk_index = Column(Integer, nullable=False)
+    # 与所属文件的 active_generation 对齐，旧代次 chunk 在投影切换后清理。
     generation = Column(Integer, nullable=False, default=1, server_default=text("1"), index=True)
     content = Column(Text, nullable=False)
     start_line = Column(Integer)
@@ -190,6 +198,7 @@ class KnowledgeChunk(Base):
     end_char_pos = Column(Integer)
     start_token_pos = Column(Integer)
     end_token_pos = Column(Integer)
+    # 图谱构建分两阶段：结构（实体/三元组/提及）写入后置 structure 标记，向量回填完成才置 graph_indexed。
     graph_structure_indexed = Column(Boolean, default=False, nullable=False)
     graph_indexed = Column(Boolean, default=False)
     graph_extraction_details = Column(
@@ -223,6 +232,7 @@ class KnowledgeGraphEntity(Base):
     label = Column(String(128), nullable=False)
     name = Column(String(512), nullable=False)
     attributes = Column(JSON_VALUE)
+    # 向量回填的租约状态：失败按 vector_next_retry_at 退避重试，locked_until 与 lock_token 标识当前执行者。
     vector_status = Column(String(16), nullable=False, default="pending")
     vector_attempt_count = Column(Integer, nullable=False, default=0)
     vector_last_error = Column(Text)
@@ -469,6 +479,7 @@ class EvaluationRunItem(Base):
         nullable=False,
         index=True,
     )
+    # dataset_item_id 与 dataset_id 只能同时有值或同时为空：MATCH FULL 复合外键在原题删除时整组置空，逐题快照自包含。
     dataset_item_id = Column(String(64), index=True)
     dataset_id = Column(String(64), index=True)
     item_index = Column(Integer, nullable=False)

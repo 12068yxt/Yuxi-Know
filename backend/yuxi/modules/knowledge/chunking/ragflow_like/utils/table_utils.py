@@ -1,3 +1,5 @@
+"""HTML 表格转键值对行，用于超长表格的切分。"""
+
 from __future__ import annotations
 
 from bs4 import BeautifulSoup
@@ -66,13 +68,10 @@ def html_table_to_key_value(html: str) -> list[str]:
 
     kv_lines = []
     for row_values in grid[1:]:
-        min_len = min(len(headers), len(row_values))
         row_parts = []
-        for i in range(min_len):
-            key = headers[i]
-            val = row_values[i] if row_values[i] is not None else ""
+        for key, val in zip(headers, row_values):
             if key:
-                row_parts.append(f"{key}：{val}")
+                row_parts.append(f"{key}：{val if val is not None else ''}")
         if row_parts:
             kv_lines.append("；".join(row_parts) + "；")
 

@@ -822,7 +822,7 @@ async def test_get_knowledge_base_types(test_client, admin_headers):
     ]
     assert "default_config" not in payload["kb_types"]["notion"]
     assert payload["kb_types"]["notion"]["name"] == "Notion"
-    assert payload["kb_types"]["notion"]["description"] == "连接 Notion Data Source 的只读知识库，支持检索、打开页面和页内查找"
+    assert payload["kb_types"]["notion"]["description"] == "连接 Notion Data Source 的只读知识库，支持检索"
     assert payload["kb_types"]["notion"]["requires_embedding_model"] is False
     assert payload["kb_types"]["notion"]["supports_documents"] is False
     assert [option["key"] for option in payload["kb_types"]["notion"]["create_params"]["options"]] == [

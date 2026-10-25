@@ -1,3 +1,5 @@
+"""markdown-it token 流的表格块提取与层次化长文切分辅助。"""
+
 from __future__ import annotations
 
 from collections.abc import Callable
@@ -7,9 +9,7 @@ from yuxi.modules.knowledge.chunking.ragflow_like.utils.semantic_utils import se
 
 
 def get_title_path(stack: list[str]) -> str:
-    """
-    根据标题栈生成标题路径，用"|"分隔。
-    """
+    """按标题栈生成以“|”分隔的标题路径。"""
     return "|".join([t for t in stack if t])
 
 
@@ -23,8 +23,7 @@ def extract_table_block(tokens: list[Any], i: int, original_lines: list[str]) ->
     3. 确定结束行号 (`table_end`)：
        - 优先使用 `table_close` token 的 `map` 属性。
        - 若不存在，则尝试查找下一个带有 `map` 信息的 token 的起始行作为当前表格的结束。
-       - 若上述均失败（如文件末尾或解析异常），则回退到基于文本内容的启发式扫描：
-         从 `table_start` 开始向下扫描，直到遇到不符合 Markdown 表格特征（不以 '|' 开头且不含 '|'）的行为止。
+       - 若上述均失败（如文件末尾或解析异常），则回退到基于文本内容的启发式扫描。
     4. 返回结果：返回 `table_close` 的索引 `j` 以及拼接后的表格原始字符串。
     """
     token = tokens[i]
@@ -43,28 +42,16 @@ def extract_table_block(tokens: list[Any], i: int, original_lines: list[str]) ->
                     table_end = tokens[k].map[0]
                     break
             if table_end is None:
-                table_end = table_start + 1
-                for line_idx in range(table_start, len(original_lines)):
-                    line = original_lines[line_idx].strip()
-                    if not line or not (line.startswith("|") or "|" in line):
-                        table_end = line_idx
-                        break
+                table_end = _scan_table_end_by_text(original_lines, table_start)
     else:
-        table_end = table_start + 1
-        for line_idx in range(table_start, len(original_lines)):
-            line = original_lines[line_idx].strip()
-            if not line or not (line.startswith("|") or "|" in line):
-                table_end = line_idx
-                break
+        table_end = _scan_table_end_by_text(original_lines, table_start)
     return j, "\n".join(original_lines[table_start:table_end])
 
 
 def split_text_by_length_and_newline(
     text: str, max_length: int, embed_fn: Callable[[list[str]], Any] | None, token_count_fn: Callable[[str], int]
 ) -> list[str]:
-    """
-    层次化文本切分策略。
-    """
+    """段落 → 行 → 语义三层递进的超长文本切分。"""
     chunks = []
 
     paragraphs = text.split("\n\n")
@@ -75,27 +62,23 @@ def split_text_by_length_and_newline(
             continue
 
         paragraph_token_count = token_count_fn(paragraph)
-
-        # 如果当前段落长度未超过最大 Token 数量，直接作为独立分块放入chunks
-        # 否则继续尝试按行切分
         if paragraph_token_count <= max_length:
             chunks.append(paragraph)
             continue
 
-        # 把段落进一步使用换行符进行切分为行
+        # 段落超限时按行累积切分；单行超限再交给语义切分兜底。
         lines = paragraph.split("\n")
         current_chunk_lines = []
         current_chunk_tokens = 0
 
         for line in lines:
             line = line.strip()
-            if not line:  # 跳过空行
+            if not line:
                 continue
 
-            line_token_count = token_count_fn(line)  # 计算当前行的 Token 数量
-            # 为了考虑行之间的空格，需要在计算 Token 数量时加 1（如果当前行不是第一行，需要添加一个换行符的Token数量）
+            line_token_count = token_count_fn(line)
+            # 行与行之间以换行拼接，非首行需要额外计 1 个 token。
             added_tokens = line_token_count + (1 if current_chunk_lines else 0)
-            # 如果当前行的 Token 数量超过最大 Token 数量，直接作为独立分块放入chunks
             if line_token_count > max_length:
                 if current_chunk_lines:
                     chunks.append("\n".join(current_chunk_lines))
@@ -109,20 +92,23 @@ def split_text_by_length_and_newline(
                     max_chunk_size=max_length,
                 )
                 chunks.extend(sub_chunks)
-            # 如果当前行的 Token 数量与当前分块的 Token 数量合并后超过最大 Token 数量，直接作为独立分块放入chunks
             elif current_chunk_tokens + added_tokens > max_length:
-                # 把之前的分块内容放入chunks
                 chunks.append("\n".join(current_chunk_lines))
-                # 重置当前分块为当前行的内容
                 current_chunk_lines = [line]
-                # 更新当前分块的 Token 数量
                 current_chunk_tokens = line_token_count
-            # 如果当前行的内容加入当前分块后不会超过最大 Token 数量，直接加入当前分块
             else:
                 current_chunk_lines.append(line)
-                current_chunk_tokens += added_tokens  # 更新当前分块的 Token 数量
-        # 最后的收尾，把最后一行内容放入chunks
+                current_chunk_tokens += added_tokens
         if current_chunk_lines:
             chunks.append("\n".join(current_chunk_lines))
 
     return chunks
+
+
+def _scan_table_end_by_text(original_lines: list[str], table_start: int) -> int:
+    """无 token.map 可用时，按 Markdown 表格行特征启发式扫描结束行号。"""
+    for line_idx in range(table_start, len(original_lines)):
+        line = original_lines[line_idx].strip()
+        if not line or not (line.startswith("|") or "|" in line):
+            return line_idx
+    return table_start + 1

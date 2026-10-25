@@ -1,3 +1,10 @@
+"""知识库只读工具的 Pydantic 契约，按 list → query → search_file → find → open 的使用顺序组织。
+
+被 MCP 工具（mcp/server.py）与 Public API（public_v1/knowledge.py）共用；字段、默认值、
+校验约束与类 docstring 都会随 model_json_schema() 对外发布，修改任一项都是契约变更。
+业务性约束（patterns 非空、kb_id/kb_name/query 三选一等）由服务层校验，这里只定义结构与取值范围。
+"""
+
 from typing import Any, Literal
 
 from pydantic import BaseModel, Field
@@ -7,6 +14,28 @@ class ListInputSchema(BaseModel):
     """可选读取文档能力供平台资源选择与引用使用。"""
 
     include_capabilities: bool = False
+
+
+class SearchInputSchema(BaseModel):
+    # query_kb 的输入：按关键词检索指定知识库的内容片段
+    kb_id: str = Field(description="知识库资源 ID，也就是 kb_id")
+    query_text: str = Field(description="检索关键词，应提炼为有助于召回答案的关键词或短语")
+    file_name: str | None = Field(default=None, description="可选文件名关键词过滤，非必要不要使用")
+
+
+class SearchResultSchema(BaseModel):
+    # query_kb 返回的单个命中片段
+    id: str = Field(description="检索结果 ID，通常对应 chunk_id")
+    kb_id: str = Field(description="知识库资源 ID，也就是 kb_id")
+    file_id: str = Field(default="", description="结果所属文件 ID，可用于 Find/Open")
+    content: str = Field(description="chunk 内容")
+    metadata: dict[str, Any] = Field(default_factory=dict, description="来源、分数、chunk_index 等附加信息")
+
+
+class SearchOutputSchema(BaseModel):
+    # query_kb 的结构化输出
+    kb_id: str = Field(description="知识库资源 ID，也就是 kb_id")
+    results: list[SearchResultSchema] = Field(default_factory=list, description="检索结果列表")
 
 
 class SearchFileInput(BaseModel):
@@ -19,26 +48,8 @@ class SearchFileInput(BaseModel):
     limit: int = Field(default=300, ge=1, le=5000, description="返回数量限制，默认 300")
 
 
-class SearchInputSchema(BaseModel):
-    kb_id: str = Field(description="知识库资源 ID，也就是 kb_id")
-    query_text: str = Field(description="检索关键词，应提炼为有助于召回答案的关键词或短语")
-    file_name: str | None = Field(default=None, description="可选文件名关键词过滤，非必要不要使用")
-
-
-class SearchResultSchema(BaseModel):
-    id: str = Field(description="检索结果 ID，通常对应 chunk_id")
-    kb_id: str = Field(description="知识库资源 ID，也就是 kb_id")
-    file_id: str = Field(default="", description="结果所属文件 ID，可用于 Find/Open")
-    content: str = Field(description="chunk 内容")
-    metadata: dict[str, Any] = Field(default_factory=dict, description="来源、分数、chunk_index 等附加信息")
-
-
-class SearchOutputSchema(BaseModel):
-    kb_id: str = Field(description="知识库资源 ID，也就是 kb_id")
-    results: list[SearchResultSchema] = Field(default_factory=list, description="检索结果列表")
-
-
 class FindInputSchema(BaseModel):
+    # find_kb_document 的输入：patterns 的"至少一个"由服务层在过滤空模式后判定
     kb_id: str = Field(description="知识库资源 ID，也就是 kb_id")
     file_id: str = Field(description="要检索的文件 ID")
     patterns: list[str] = Field(description="关键词或正则模式列表，至少提供一个")
@@ -49,6 +60,7 @@ class FindInputSchema(BaseModel):
 
 
 class FindWindowSchema(BaseModel):
+    # find_kb_document 返回的单个上下文窗口
     start_line: int = Field(description="窗口起始行号，1-based")
     end_line: int = Field(description="窗口结束行号，1-based")
     matched_lines: list[int] = Field(default_factory=list, description="该窗口内匹配到的行号")
@@ -56,6 +68,7 @@ class FindWindowSchema(BaseModel):
 
 
 class FindOutputSchema(BaseModel):
+    # find_kb_document 的结构化输出
     kb_id: str = Field(description="知识库资源 ID，也就是 kb_id")
     file_id: str = Field(description="文件 ID")
     semantic: bool = Field(default=False, description="是否为语义查找")
@@ -65,6 +78,7 @@ class FindOutputSchema(BaseModel):
 
 
 class OpenInputSchema(BaseModel):
+    # open_kb_document 的输入：line 与 offset 同时提供时 line 优先
     kb_id: str = Field(description="知识库资源 ID，也就是 kb_id")
     file_id: str = Field(description="要打开的文件 ID")
     line: int | None = Field(default=None, ge=1, description="可选，1-based 起始行号")
@@ -73,6 +87,7 @@ class OpenInputSchema(BaseModel):
 
 
 class OpenOutputSchema(BaseModel):
+    # open_kb_document 的结构化输出；next_offset 供长文连续读取
     kb_id: str = Field(description="知识库资源 ID，也就是 kb_id")
     file_id: str = Field(description="文件 ID")
     start_line: int = Field(description="窗口起始行号，1-based；空结果为 0")

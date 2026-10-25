@@ -21,7 +21,8 @@ class KnowledgeBaseConfig:
 
     @property
     def query_options(self) -> dict[str, Any]:
-        """返回持久化查询参数中的 options。"""
+        """返回 query_params 中的检索 options；缺失或非字典时回退为空字典。"""
+        # query_params 直接来自持久化 JSON，options 的形状不受类型约束。
         options = self.query_params.get("options")
         return options if isinstance(options, dict) else {}
 
@@ -51,6 +52,7 @@ class KnowledgeBaseSummary:
     pending_index_count: int = 0
     processing_count: int = 0
     file_status_counts: dict[str, int] = field(default_factory=dict)
+    # 仅由按用户权限过滤的读取路径填充；为 None 表示未经权限过滤，can_manage 随之为 False。
     effective_permission: ResourcePermission | None = None
 
     @property
@@ -64,6 +66,8 @@ class KnowledgeBaseDetail(KnowledgeBaseSummary):
     """知识库详情读取模型，在摘要基础上增加详情页字段。"""
 
     sample_questions: tuple[str, ...] = ()
+    # files 以 file_id 为键；None 表示未请求文件列表，空字典表示已请求但无文件。
     files: dict[str, dict[str, Any]] | None = None
+    # 文件列表按 files_page_size 截断返回首页，超出时 files_truncated 为真。
     files_truncated: bool = False
     files_page_size: int | None = None

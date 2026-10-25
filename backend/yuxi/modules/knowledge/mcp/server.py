@@ -3,14 +3,17 @@
 import json
 import os
 from collections.abc import Awaitable, Callable
+from typing import Any
 
 from mcp import types
 from mcp.server.lowlevel import Server
 from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
 from mcp.server.transport_security import TransportSecuritySettings
+from pydantic import BaseModel
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 from starlette.routing import Route
+from starlette.types import Receive, Scope, Send
 
 from yuxi.infrastructure.postgres.manager import pg_manager
 from yuxi.modules.identity.models import User
@@ -26,6 +29,9 @@ from yuxi.modules.knowledge.schemas import (
 )
 from yuxi.modules.knowledge.services import tools as knowledge_tools
 from yuxi.modules.knowledge.services.access import visible_knowledge_bases
+
+# 默认 Host 白名单，防 DNS rebinding；部署可用 YUXI_MCP_ALLOWED_HOSTS 覆盖。
+_DEFAULT_ALLOWED_HOSTS = "localhost:*,127.0.0.1:*,api:*"
 
 
 class KnowledgeMCP:
@@ -46,7 +52,7 @@ class KnowledgeMCP:
                 "只能访问当前调用用户可见且在委托范围内的知识库；404 后重新 list_kbs/search_file，勿猜测资源 ID。"
             ),
         )
-        self.tools = {
+        self.tools: dict[str, tuple[type[BaseModel], str]] = {
             "list_kbs": (
                 ListInputSchema,
                 "列出当前用户可见知识库的 kb_id、name、description。先按名称和描述选择检索范围，再调用 query_kb 或 search_file。",
@@ -87,13 +93,13 @@ class KnowledgeMCP:
             stateless=True,
             json_response=True,
             security_settings=TransportSecuritySettings(
-                allowed_hosts=os.getenv("YUXI_MCP_ALLOWED_HOSTS", "localhost:*,127.0.0.1:*,api:*").split(","),
+                allowed_hosts=os.getenv("YUXI_MCP_ALLOWED_HOSTS", _DEFAULT_ALLOWED_HOSTS).split(","),
                 allowed_origins=[],
             ),
         )
         self.route = Route(KNOWLEDGE_MCP_PATH, endpoint=self, methods=["GET", "POST", "DELETE"])
 
-    async def __call__(self, scope, receive, send):
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         """每个 HTTP 请求重新验证 Key 或内部委托，不缓存身份与范围。"""
         request = Request(scope, receive)
         authorization = request.headers.get("authorization", "")
@@ -104,14 +110,16 @@ class KnowledgeMCP:
                 user = await self.authenticate_api_key(request, authorization, db)
             elif authorization.startswith("Bearer "):
                 try:
-                    user, selection = await authenticate_knowledge_delegate(authorization[7:], db)
+                    user, selection = await authenticate_knowledge_delegate(authorization.removeprefix("Bearer "), db)
                 except ValueError:
-                    user = None
+                    # 无效或过期的委托视同未认证，统一落到下方 401 质询
+                    pass
         if user is None:
             user = JSONResponse({"detail": "Invalid Knowledge delegation"}, status_code=401, headers={"WWW-Authenticate": "Bearer"})
         if isinstance(user, Response):
             await user(scope, receive, send)
             return
+        # 无状态传输下经同一请求 scope 把身份传给 call_tool
         request.state.knowledge_mcp_uid = user.uid
         request.state.knowledge_mcp_selection = selection
         await self.manager.handle_request(scope, receive, send)
@@ -128,15 +136,17 @@ class KnowledgeMCP:
             for name, (model, description) in self.tools.items()
         ]
 
-    async def call_tool(self, name: str, arguments: dict) -> types.CallToolResult:
+    async def call_tool(self, name: str, arguments: dict[str, Any]) -> types.CallToolResult:
         """在固定工具集合中调用当前用户可见资源的既有用例。"""
         if name not in self.tools:
             return types.CallToolResult(isError=True, content=[types.TextContent(type="text", text="Unknown knowledge tool")])
         try:
+            # 与 __call__ 共享同一请求 scope，读回入口写入的当前身份与选择
             state = self.server.request_context.request.state
             visible = await visible_knowledge_bases(state.knowledge_mcp_uid, selection=state.knowledge_mcp_selection)
             model, _ = self.tools[name]
             payload = model.model_validate(arguments)
+            # list_kbs 是同步用例；结构化输出按客户端约定包一层 knowledge_bases
             if name == "list_kbs":
                 result = knowledge_tools.list_kbs(visible, include_capabilities=payload.include_capabilities)
             else:

@@ -1,3 +1,5 @@
+"""分块契约入口：按预设策略切分 Markdown 并装配可持久化的来源范围。"""
+
 from __future__ import annotations
 
 from typing import Any, NotRequired, TypedDict
@@ -71,6 +73,7 @@ def _build_chunk_records(text_chunks: list[str], file_id: str, source_text: str 
 
 
 def _dispatch_markdown_parser(preset_id: str, filename: str, markdown_content: str, parser_config: dict[str, Any]) -> list[str]:
+    """按内部 ID 分派到具体分块器；qa/laws 需要文件名参与识别。"""
     parser_id = map_to_internal_parser_id(preset_id)
 
     if parser_id == "naive":

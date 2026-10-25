@@ -9,7 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from yuxi.modules.knowledge.file_status import FileStatus
 from yuxi.modules.knowledge.models import KnowledgeBase, KnowledgeFile, KnowledgeImport
-from yuxi.modules.knowledge.names import suffixed_name
+from yuxi.modules.knowledge.names import MAX_NAME_LENGTH, suffixed_name
 from yuxi.shared.errors import InvalidInputError, InvalidOperationError, ResourceNotFoundError, StateConflictError
 
 
@@ -103,7 +103,8 @@ class DirectoryRepository:
             return requested
         suffixed_name(requested, 1)  # 先验证扩展名保留后仍有主名预算。
         stem, extension = splitext(requested)
-        # 在数据库内寻找最小空位，避免高重名批次产生平方级网络往返。
+        # 在数据库内寻找最小空位，避免高重名批次产生平方级网络往返；
+        # 名称预算与 names.MAX_NAME_LENGTH 单一来源绑定。
         statement = text("""
             WITH siblings AS MATERIALIZED (
                 SELECT normalize(lower(normalize(btrim(filename), NFC)), NFC) AS key
@@ -111,10 +112,10 @@ class DirectoryRepository:
                 WHERE kb_id = :kb_id AND parent_id IS NOT DISTINCT FROM CAST(:parent_id AS text)
                   AND deleted_at IS NULL AND (CAST(:exclude_id AS text) IS NULL OR file_id <> :exclude_id)
             ), candidates AS (
-                SELECT n, left(:stem, 512 - length(:extension) - length(' (' || n || ')'))
+                SELECT n, left(:stem, :max_name_length - length(:extension) - length(' (' || n || ')'))
                        || ' (' || n || ')' || :extension AS name
                 FROM generate_series(1, (SELECT count(*)::integer + 1 FROM siblings)) AS n
-                WHERE 512 - length(:extension) - length(' (' || n || ')') >= 1
+                WHERE :max_name_length - length(:extension) - length(' (' || n || ')') >= 1
             )
             SELECT name FROM candidates
             WHERE NOT EXISTS (
@@ -131,6 +132,7 @@ class DirectoryRepository:
                     "exclude_id": exclude_id,
                     "stem": stem,
                     "extension": extension,
+                    "max_name_length": MAX_NAME_LENGTH,
                 },
             )
         ).scalar_one_or_none()

@@ -10,44 +10,11 @@ from typing import Any
 from yuxi.infrastructure.observability.logging import logger
 from yuxi.infrastructure.redis import get_async_redis_client
 
+# 键格式、TTL 与失效语义是与 Redis 及其他进程共享的契约，不能单方面变更。
 KNOWLEDGE_BASE_CACHE_KEY_PREFIX = "yuxi:knowledge_base:"
 KNOWLEDGE_BASE_CACHE_TTL_SECONDS = 3600
 KNOWLEDGE_BASE_CACHE_LOCK_TIMEOUT_SECONDS = 30
 KNOWLEDGE_BASE_CACHE_LOCK_WAIT_SECONDS = 10
-
-
-def _cache_key(kb_id: str) -> str:
-    return f"{KNOWLEDGE_BASE_CACHE_KEY_PREFIX}{kb_id}"
-
-
-def _cache_lock_key(kb_id: str) -> str:
-    return f"{_cache_key(kb_id)}:lock"
-
-
-@asynccontextmanager
-async def kb_config_cache_lock(kb_id: str) -> AsyncIterator[None]:
-    """串行化单个知识库的缓存回填与持久化更新。"""
-    redis = await get_async_redis_client()
-    lock = redis.lock(
-        _cache_lock_key(kb_id),
-        timeout=KNOWLEDGE_BASE_CACHE_LOCK_TIMEOUT_SECONDS,
-        blocking_timeout=KNOWLEDGE_BASE_CACHE_LOCK_WAIT_SECONDS,
-    )
-    async with lock:
-        yield
-
-
-def serialize_kb_config(row: Any) -> dict[str, Any]:
-    """将知识库记录转换为最小运行配置快照。"""
-    additional_params = dict(row.additional_params or {})
-    additional_params.pop("stats", None)
-    return {
-        "kb_id": row.kb_id,
-        "kb_type": row.kb_type or "milvus",
-        "embedding_model_spec": row.embedding_model_spec,
-        "query_params": row.query_params,
-        "additional_params": additional_params,
-    }
 
 
 async def get_cached_kb_config(kb_id: str) -> dict[str, Any] | None:
@@ -85,3 +52,38 @@ async def delete_cached_kb_config(kb_id: str) -> None:
     """删除单个知识库运行时快照，失败时由调用方中止写操作。"""
     redis = await get_async_redis_client()
     await redis.delete(_cache_key(kb_id))
+
+
+@asynccontextmanager
+async def kb_config_cache_lock(kb_id: str) -> AsyncIterator[None]:
+    """串行化单个知识库的缓存回填与持久化更新。"""
+    redis = await get_async_redis_client()
+    lock = redis.lock(
+        _cache_lock_key(kb_id),
+        timeout=KNOWLEDGE_BASE_CACHE_LOCK_TIMEOUT_SECONDS,
+        blocking_timeout=KNOWLEDGE_BASE_CACHE_LOCK_WAIT_SECONDS,
+    )
+    async with lock:
+        yield
+
+
+def serialize_kb_config(row: Any) -> dict[str, Any]:
+    """将知识库记录转换为最小运行配置快照。"""
+    additional_params = dict(row.additional_params or {})
+    # stats 由统计链路独立刷新且不失效缓存，进入快照会长期读到过期统计。
+    additional_params.pop("stats", None)
+    return {
+        "kb_id": row.kb_id,
+        "kb_type": row.kb_type or "milvus",
+        "embedding_model_spec": row.embedding_model_spec,
+        "query_params": row.query_params,
+        "additional_params": additional_params,
+    }
+
+
+def _cache_key(kb_id: str) -> str:
+    return f"{KNOWLEDGE_BASE_CACHE_KEY_PREFIX}{kb_id}"
+
+
+def _cache_lock_key(kb_id: str) -> str:
+    return f"{_cache_key(kb_id)}:lock"

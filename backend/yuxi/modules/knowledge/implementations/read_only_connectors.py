@@ -6,7 +6,8 @@ from yuxi.modules.knowledge.base import KnowledgeExecutor
 class ReadOnlyConnectors(KnowledgeExecutor):
     """只读外部检索连接器基类。
 
-    这类知识库只负责保存连接参数和执行 Query，不承载文档上传、解析、索引和文件预览能力。
+    这类知识库只负责保存连接参数和执行 Query，不承载文档上传、解析、索引和文件预览能力；
+    下方桩方法按基类业务流顺序排列，统一显式拒绝写路径。
     """
 
     requires_embedding_model = False
@@ -43,36 +44,6 @@ class ReadOnlyConnectors(KnowledgeExecutor):
         del kb_id, file_id, operator_id, additional_params, processing_job_id, processing_owner
         raise self._readonly_error()
 
-    async def update_file_params(
-        self,
-        kb_id: str,
-        file_id: str,
-        params: dict,
-        operator_id: str | None = None,
-        *,
-        additional_params: dict[str, Any],
-    ) -> None:
-        del kb_id, file_id, params, operator_id, additional_params
-        raise self._readonly_error()
-
-    async def create_folder(
-        self,
-        kb_id: str,
-        folder_name: str,
-        parent_id: str | None = None,
-        operator_id: str | None = None,
-    ) -> dict:
-        raise self._readonly_error()
-
-    async def move_file(self, kb_id: str, file_id: str, new_parent_id: str | None) -> dict:
-        raise self._readonly_error()
-
-    async def rename_folder(self, kb_id: str, folder_id: str, folder_name: str) -> dict:
-        raise self._readonly_error()
-
-    async def delete_folder(self, kb_id: str, folder_id: str) -> None:
-        raise self._readonly_error()
-
     async def index_file(
         self,
         kb_id: str,
@@ -97,7 +68,16 @@ class ReadOnlyConnectors(KnowledgeExecutor):
         )
         raise self._readonly_error()
 
-    async def delete_file(self, kb_id: str, file_id: str) -> None:
+    async def update_file_params(
+        self,
+        kb_id: str,
+        file_id: str,
+        params: dict,
+        operator_id: str | None = None,
+        *,
+        additional_params: dict[str, Any],
+    ) -> None:
+        del kb_id, file_id, params, operator_id, additional_params
         raise self._readonly_error()
 
     async def get_file_basic_info(self, kb_id: str, file_id: str) -> dict:
@@ -105,6 +85,13 @@ class ReadOnlyConnectors(KnowledgeExecutor):
 
     async def get_file_content(self, kb_id: str, file_id: str) -> dict:
         raise self._readonly_error()
+
+    async def get_file_info(self, kb_id: str, file_id: str) -> dict:
+        raise self._readonly_error()
+
+    async def get_file_download(self, kb_id: str, file_id: str, variant: str = "original") -> dict:
+        del kb_id, file_id, variant
+        raise ValueError("只读检索连接器不支持文件下载")
 
     async def open_file_content(self, kb_id: str, file_id: str, offset: int = 0, limit: int = 800) -> dict:
         del offset, limit
@@ -124,9 +111,23 @@ class ReadOnlyConnectors(KnowledgeExecutor):
         del kb_id, file_id, patterns, use_regex, case_sensitive, max_windows, window_size
         raise self._readonly_error()
 
-    async def get_file_info(self, kb_id: str, file_id: str) -> dict:
+    async def create_folder(
+        self,
+        kb_id: str,
+        folder_name: str,
+        parent_id: str | None = None,
+        operator_id: str | None = None,
+    ) -> dict:
         raise self._readonly_error()
 
-    async def get_file_download(self, kb_id: str, file_id: str, variant: str = "original") -> dict:
-        del kb_id, file_id, variant
-        raise ValueError("只读检索连接器不支持文件下载")
+    async def rename_folder(self, kb_id: str, folder_id: str, folder_name: str) -> dict:
+        raise self._readonly_error()
+
+    async def move_file(self, kb_id: str, file_id: str, new_parent_id: str | None) -> dict:
+        raise self._readonly_error()
+
+    async def delete_folder(self, kb_id: str, folder_id: str) -> None:
+        raise self._readonly_error()
+
+    async def delete_file(self, kb_id: str, file_id: str) -> None:
+        raise self._readonly_error()

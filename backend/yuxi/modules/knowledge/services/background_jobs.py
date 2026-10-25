@@ -1,3 +1,5 @@
+"""知识库后台作业 Handler：文档解析、入库与图谱构建的可重建执行，以及失败 attempt 的文件状态收敛。"""
+
 from __future__ import annotations
 
 import asyncio
@@ -9,19 +11,13 @@ from yuxi.modules.knowledge.repositories.files import KnowledgeFileRepository
 from yuxi.modules.knowledge.runtime import knowledge_base
 
 if TYPE_CHECKING:
+    from sqlalchemy.ext.asyncio import AsyncSession
+
+    from yuxi.modules.background_jobs.models import BackgroundJobRecord
     from yuxi.workers.background_job_context import BackgroundJobContext
 
 DOCUMENT_ACTION_BATCH_SIZE = 500
 DOCUMENT_ACTION_RESULT_ITEM_LIMIT = 200
-
-
-async def fail_knowledge_file_job(session, job_record, error: str) -> None:
-    """原子收敛仍由失败 Job attempt 拥有的知识文件中间态。"""
-    await KnowledgeFileRepository.fail_job_processing_in_session(
-        session,
-        job_id=job_record.id,
-        error=error,
-    )
 
 
 async def run_knowledge_ingest(context: BackgroundJobContext) -> dict:
@@ -29,7 +25,6 @@ async def run_knowledge_ingest(context: BackgroundJobContext) -> dict:
     payload = context.payload
     kb_id = payload["kb_id"]
     added_files = [{**record, "index": index} for index, record in enumerate(payload["files"])]
-    items = [record["item"] for record in added_files]
     params = dict(payload.get("params") or {})
     operator_id = payload["operator_id"]
     auto_index = bool(params.get("auto_index", False))
@@ -40,17 +35,19 @@ async def run_knowledge_ingest(context: BackgroundJobContext) -> dict:
     }
 
     await context.set_progress(5.0, "准备处理文档")
-    total = len(items)
-    processed_items: list[dict | None] = [None] * total
+    total = len(added_files)
+    # 结果按输入顺序逐个写入：auto_index 下已解析文件先持有解析结果，入库阶段再按 index 覆盖为入库结果。
+    processed_items: list[dict] = []
     parsed_files: list[dict] = []
 
     try:
+        # 进度刻度：5 准备、30–parse_end 解析（auto_index 为入库预留 60–95 段）、100 收尾。
         parse_end = 60.0 if auto_index else 95.0
         for index, record in enumerate(added_files, 1):
             await context.raise_if_cancelled()
             await context.set_progress(
-                30.0 + (index / len(added_files)) * (parse_end - 30.0),
-                f"[2/3] 解析文件 {index}/{len(added_files)}",
+                30.0 + (index / total) * (parse_end - 30.0),
+                f"[2/3] 解析文件 {index}/{total}",
             )
             try:
                 file_meta = await knowledge_base.parse_file(
@@ -59,20 +56,22 @@ async def run_knowledge_ingest(context: BackgroundJobContext) -> dict:
                     operator_id=operator_id,
                     **processing_owner,
                 )
+                processed_items.append(file_meta)
                 if auto_index and file_meta.get("status") == "parsed":
                     parsed_files.append(record)
-                else:
-                    processed_items[record["index"]] = file_meta
             except Exception as exc:
                 _log_document_failure(context, kb_id=kb_id, action="parse", exc=exc, file_id=record["file_id"])
-                error_type = "timeout" if isinstance(exc, TimeoutError) else "parse_failed"
-                error_message = "解析超时" if isinstance(exc, TimeoutError) else "解析失败"
-                processed_items[record["index"]] = {
-                    "item": record["item"],
-                    "status": "failed",
-                    "error": f"{error_message}: {exc}",
-                    "error_type": error_type,
-                }
+                timed_out = isinstance(exc, TimeoutError)
+                error_type = "timeout" if timed_out else "parse_failed"
+                error_message = "解析超时" if timed_out else "解析失败"
+                processed_items.append(
+                    {
+                        "item": record["item"],
+                        "status": "failed",
+                        "error": f"{error_message}: {exc}",
+                        "error_type": error_type,
+                    }
+                )
 
         for index, record in enumerate(parsed_files, 1):
             await context.raise_if_cancelled()
@@ -103,23 +102,13 @@ async def run_knowledge_ingest(context: BackgroundJobContext) -> dict:
                     "error_type": "index_failed",
                 }
     except asyncio.CancelledError:
+        # 取消只发生在安全点：保留最终提示后把取消信号原样交还给 worker。
         await context.set_progress(100.0, "任务已取消")
         raise
 
     await context.raise_if_cancelled()
-    final_items = [
-        item
-        if item is not None
-        else {
-            "item": items[index],
-            "status": "failed",
-            "error": "文件未处理",
-            "error_type": "not_processed",
-        }
-        for index, item in enumerate(processed_items)
-    ]
-    failed_count = sum(_is_failed_item(item) for item in final_items)
-    summary = _document_result(final_items, processed=total, failed=failed_count)
+    failed_count = sum(_is_failed_item(item) for item in processed_items)
+    summary = _document_result(processed_items, processed=total, failed=failed_count)
     summary.update(kb_id=kb_id, item_type="文件", submitted=total)
     await context.set_result(summary)
     await context.set_progress(100.0, f"文件处理完成，失败 {failed_count} 个" if failed_count else "文件处理完成")
@@ -169,7 +158,20 @@ async def run_knowledge_graph(context: BackgroundJobContext) -> dict:
     return result
 
 
+async def fail_knowledge_file_job(session: AsyncSession, job_record: BackgroundJobRecord, error: str) -> None:
+    """原子收敛仍由失败 Job attempt 拥有的知识文件中间态。"""
+    await KnowledgeFileRepository.fail_job_processing_in_session(
+        session,
+        job_id=job_record.id,
+        error=error,
+    )
+
+
+# ---- 内部执行：按 file_ids 或状态游标批量执行文档动作 ----
+
+
 async def _run_file_ids(context: BackgroundJobContext, *, action: str) -> dict:
+    """按 payload 指定的 file_ids 顺序执行解析或入库。"""
     payload = context.payload
     kb_id = payload["kb_id"]
     file_ids = list(payload["file_ids"])
@@ -185,8 +187,8 @@ async def _run_file_ids(context: BackgroundJobContext, *, action: str) -> dict:
             5.0 + (index / len(file_ids)) * 90.0,
             f"正在{label}第 {index}/{len(file_ids)} 个文档",
         )
-        try:
-            result = await _process_document_file(
+        processed_items.append(
+            await _process_document_file(
                 context,
                 kb_id=kb_id,
                 file_id=file_id,
@@ -194,10 +196,7 @@ async def _run_file_ids(context: BackgroundJobContext, *, action: str) -> dict:
                 params=params,
                 operator_id=operator_id,
             )
-            processed_items.append(result)
-        except Exception as exc:
-            _log_document_failure(context, kb_id=kb_id, action=action, exc=exc, file_id=file_id)
-            processed_items.append({"file_id": file_id, "status": "failed", "error": str(exc)})
+        )
 
     await context.raise_if_cancelled()
     failed_count = sum(_is_failed_item(item) for item in processed_items)
@@ -210,6 +209,7 @@ async def _run_file_ids(context: BackgroundJobContext, *, action: str) -> dict:
 
 
 async def _run_pending_files(context: BackgroundJobContext, *, action: str) -> dict:
+    """按状态游标分页扫描待处理文件并逐个执行动作。"""
     payload = context.payload
     kb_id = payload["kb_id"]
     statuses = list(payload["statuses"])
@@ -236,30 +236,23 @@ async def _run_pending_files(context: BackgroundJobContext, *, action: str) -> d
             await context.raise_if_cancelled()
             after_file_id = file_id
             processed_count += 1
+            # 提交时的 count 可能与实际漂移，分母取较大者，保证进度不超过 95。
             progress_total = max(initial_total, processed_count)
             await context.set_progress(
                 5.0 + (processed_count / progress_total) * 90.0,
                 f"正在{label}第 {processed_count}/{progress_total} 个文档",
             )
-            try:
-                result = await _process_document_file(
-                    context,
-                    kb_id=kb_id,
-                    file_id=file_id,
-                    action=action,
-                    params=params,
-                    operator_id=operator_id,
-                )
-                if _is_failed_item(result):
-                    failed_count += 1
-                _append_result_sample(result_items, result)
-            except Exception as exc:
+            result = await _process_document_file(
+                context,
+                kb_id=kb_id,
+                file_id=file_id,
+                action=action,
+                params=params,
+                operator_id=operator_id,
+            )
+            if _is_failed_item(result):
                 failed_count += 1
-                _log_document_failure(context, kb_id=kb_id, action=action, exc=exc, file_id=file_id)
-                _append_result_sample(
-                    result_items,
-                    {"file_id": file_id, "status": "failed", "error": str(exc)},
-                )
+            _append_result_sample(result_items, result)
 
     await context.raise_if_cancelled()
     result = _document_result(result_items, processed=processed_count, failed=failed_count)
@@ -282,16 +275,23 @@ async def _process_document_file(
     params: dict,
     operator_id: str,
 ) -> dict:
-    """先更新参数，再以当前 attempt 身份执行单文件解析或入库。"""
-    if params:
-        await knowledge_base.update_file_params(kb_id, file_id, params, operator_id=operator_id)
+    """先更新参数，再以当前 attempt 身份执行单文件动作；异常转为失败结果并记录日志。"""
     processing_owner = {
         "processing_job_id": context.job_id,
         "processing_owner": context.worker_id,
     }
-    if action == "parse":
-        return await knowledge_base.parse_file(kb_id, file_id, operator_id=operator_id, **processing_owner)
-    return await knowledge_base.index_file(kb_id, file_id, operator_id=operator_id, params=params, **processing_owner)
+    try:
+        if params:
+            await knowledge_base.update_file_params(kb_id, file_id, params, operator_id=operator_id)
+        if action == "parse":
+            return await knowledge_base.parse_file(kb_id, file_id, operator_id=operator_id, **processing_owner)
+        return await knowledge_base.index_file(kb_id, file_id, operator_id=operator_id, params=params, **processing_owner)
+    except Exception as exc:
+        _log_document_failure(context, kb_id=kb_id, action=action, exc=exc, file_id=file_id)
+        return {"file_id": file_id, "status": "failed", "error": str(exc)}
+
+
+# ---- 失败日志与有界结果装配 ----
 
 
 def _log_document_failure(

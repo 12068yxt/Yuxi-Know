@@ -31,7 +31,7 @@ async def register_import(
 ) -> dict:
     """发布完整文件归属及作业；相同意图只登记一次。"""
     if not items or len(items) > MAX_IMPORT_ITEMS or len(set(items)) != len(items):
-        raise InvalidInputError("每次导入需要 1 至 500 个不同的暂存对象")
+        raise InvalidInputError(f"每次导入需要 1 至 {MAX_IMPORT_ITEMS} 个不同的暂存对象")
     identity = import_id if import_id is not None else hashlib.sha256(json.dumps(items, ensure_ascii=False).encode()).hexdigest()
     if not identity or len(identity) > 128:
         raise InvalidInputError("import_id 必须为 1 至 128 个字符")
@@ -52,6 +52,7 @@ async def register_import(
     prepared = []
     owned_objects = []
     try:
+        # 逐项校验暂存原件归属与指纹，转存 original 并推导目录段。
         for item in items:
             metadata = await prepare_item_metadata(item, "file", kb_id, params=params_for_uploaded_document(item, params))
             bucket, object_name = parse_minio_url(metadata["path"])
@@ -109,6 +110,8 @@ async def register_import(
 
 async def _register_prepared(*, kb_id, prepared, params, operator_id, identity, fingerprint, process) -> dict:
     """仅在数据库事务中登记目录、文件、回执及作业。"""
+    from yuxi.modules.knowledge.repositories.files import KnowledgeFileRepository
+
     repo = DirectoryRepository()
 
     async with pg_manager.get_async_session_context() as session:
@@ -144,12 +147,12 @@ async def _register_prepared(*, kb_id, prepared, params, operator_id, identity, 
                         folder = await repo.folder(session, kb_id, target, segment, operator_id, reuse=True)
                         target = folder.file_id
                     name = await repo.available_name(session, kb_id, target, segments[-1])
-                    data = KnowledgeExecutor._file_meta_to_record_data(metadata)
+                    data = KnowledgeExecutor.file_meta_to_record_data(metadata)
                     data.update(filename=name, parent_id=target, status=FileStatus.UPLOADED, created_by=operator_id)
                     record = KnowledgeFile(file_id=metadata["file_id"], **data)
                     session.add(record)
                     await repo.flush(session)
-                    meta = KnowledgeExecutor._file_record_to_meta(record)
+                    meta = KnowledgeExecutor.file_record_to_meta(record)
                 added.append({"index": index, "item": item, "file_id": record.file_id, "status": record.status, "file_meta": meta})
             except DomainError as exc:
                 failed.append({"index": index, "item": item, "status": "failed", "error": exc.message, "code": exc.code})
@@ -171,8 +174,6 @@ async def _register_prepared(*, kb_id, prepared, params, operator_id, identity, 
                 payload={"kb_id": kb_id, "files": added, "params": params, "operator_id": operator_id},
             )
             response.update(job_id=job.id, status="queued")
-        from yuxi.modules.knowledge.repositories.files import KnowledgeFileRepository
-
         stats = await KnowledgeFileRepository().query_kb_file_stats(kb_id, session=session)
         kb.additional_params = {**(kb.additional_params or {}), "stats": stats}
         session.add(

@@ -1,23 +1,68 @@
+"""法规类文本分块：法条识别、章/节/条树形合并与 token 上限保护。"""
+
 from __future__ import annotations
 
 import re
 from typing import Any
 
 from yuxi.modules.knowledge.chunking.ragflow_like import nlp
+from yuxi.modules.knowledge.chunking.ragflow_like.parsers.general import unescape_delimiter
 from yuxi.modules.knowledge.chunking.source_spans import SourceText, join_source_text
 
 _ARTICLE_PATTERN = re.compile(r"^(第[零一二三四五六七八九十百千万0-9]+条)[\s　:：]*(.*)$")
 
 
-def _unescape_delimiter(delimiter: str) -> str:
-    return delimiter.replace("\\n", "\n").replace("\\r", "\r").replace("\\t", "\t").replace("\\\\", "\\")
+def chunk_markdown(filename: str, markdown_content: str, parser_config: dict[str, Any] | None = None) -> list[str]:
+    """
+    法规分块主流程（简化版）：
+    - docx 优先尝试标题树；
+    - 其余格式先做法规文本归一化，再按章/节/条树形切分（depth=3）；
+    - 最后统一执行超长保护。
+    """
+    parser_config = parser_config or {}
+    markdown_content = SourceText(markdown_content or "")
+
+    delimiter = unescape_delimiter(str(parser_config.get("delimiter", "\n") or "\n"))
+    chunk_token_num = int(parser_config.get("chunk_token_num", 512) or 512)
+    overlapped_percent = int(parser_config.get("overlapped_percent", 0) or 0)
+
+    if re.search(r"\.docx$", filename or "", re.IGNORECASE):
+        docx_chunks = _docx_heading_tree(markdown_content)
+        if len(docx_chunks) > 1:
+            return _ensure_chunk_token_limit(docx_chunks, chunk_token_num, delimiter, overlapped_percent)
+
+    sections = _iter_law_sections(markdown_content)
+    if not sections:
+        return []
+
+    nlp.remove_contents_table(sections, eng=nlp.is_english(sections))
+    typed_sections = [(s, "") for s in sections]
+    nlp.make_colon_as_title(typed_sections)
+
+    bull = nlp.bullets_category([s for s, _ in typed_sections])
+    if bull == nlp.MARKDOWN_BULLET_GROUP_INDEX:
+        # 归一化后仍命中 markdown 组时，回退到中文法规层级组，避免退化成“按章大块”。
+        bull = 0
+
+    merged = nlp.tree_merge(bull, typed_sections, depth=3)
+    if not merged:
+        merged = nlp.naive_merge(
+            typed_sections,
+            chunk_token_num=chunk_token_num,
+            delimiter=delimiter,
+            overlapped_percent=overlapped_percent,
+        )
+
+    return _ensure_chunk_token_limit(merged, chunk_token_num, delimiter, overlapped_percent)
 
 
 def _iter_lines(markdown_content: str) -> list[str]:
+    """去掉空行并裁剪行首尾空白。"""
     return [line.strip() for line in (markdown_content or "").splitlines() if line.strip()]
 
 
 def _normalize_law_line(line: str) -> str:
+    """剥离 markdown 装饰并压缩空白，同时保留字符来源。"""
     # 法规 markdown 常见的 #、-、** 装饰会干扰层级识别，这里先做轻量归一化。
     text = (line or "").strip()
     for pattern in (r"^#{1,6}\s+", r"^[-*+]\s+"):
@@ -37,6 +82,7 @@ def _normalize_law_line(line: str) -> str:
 
 
 def _expand_article_line(line: str) -> list[str]:
+    """把“第X条 正文”行拆成条号与正文两个片段。"""
     normalized = _normalize_law_line(line)
     if not normalized:
         return []
@@ -53,6 +99,7 @@ def _expand_article_line(line: str) -> list[str]:
 
 
 def _iter_law_sections(markdown_content: str) -> list[str]:
+    """逐行展开法条得到法规片段序列。"""
     sections: list[str] = []
     for line in _iter_lines(markdown_content):
         sections.extend(_expand_article_line(line))
@@ -60,6 +107,7 @@ def _iter_law_sections(markdown_content: str) -> list[str]:
 
 
 def _docx_heading_tree(markdown_content: str) -> list[str]:
+    """docx 来源优先按标题层级树合并。"""
     lines: list[tuple[int, str]] = []
     level_set: set[int] = set()
 
@@ -148,47 +196,3 @@ def _ensure_chunk_token_limit(chunks: list[str], chunk_token_num: int, delimiter
                         protected.extend(nlp.hard_split_by_token_limit(text, max_tokens))
 
     return [chunk for chunk in protected if chunk.strip()]
-
-
-def chunk_markdown(filename: str, markdown_content: str, parser_config: dict[str, Any] | None = None) -> list[str]:
-    """
-    法规分块主流程（简化版）：
-    - docx 优先尝试标题树；
-    - 其余格式先做法规文本归一化，再按章/节/条树形切分（depth=3）；
-    - 最后统一执行超长保护。
-    """
-    parser_config = parser_config or {}
-    markdown_content = SourceText(markdown_content or "")
-
-    delimiter = _unescape_delimiter(str(parser_config.get("delimiter", "\n") or "\n"))
-    chunk_token_num = int(parser_config.get("chunk_token_num", 512) or 512)
-    overlapped_percent = int(parser_config.get("overlapped_percent", 0) or 0)
-
-    if re.search(r"\.docx$", filename or "", re.IGNORECASE):
-        docx_chunks = _docx_heading_tree(markdown_content)
-        if len(docx_chunks) > 1:
-            return _ensure_chunk_token_limit(docx_chunks, chunk_token_num, delimiter, overlapped_percent)
-
-    sections = _iter_law_sections(markdown_content)
-    if not sections:
-        return []
-
-    nlp.remove_contents_table(sections, eng=nlp.is_english(sections))
-    typed_sections = [(s, "") for s in sections]
-    nlp.make_colon_as_title(typed_sections)
-
-    bull = nlp.bullets_category([s for s, _ in typed_sections])
-    if bull == nlp.MARKDOWN_BULLET_GROUP_INDEX:
-        # 归一化后仍命中 markdown 组时，回退到中文法规层级组，避免退化成“按章大块”。
-        bull = 0
-
-    merged = nlp.tree_merge(bull, typed_sections, depth=3)
-    if not merged:
-        merged = nlp.naive_merge(
-            typed_sections,
-            chunk_token_num=chunk_token_num,
-            delimiter=delimiter,
-            overlapped_percent=overlapped_percent,
-        )
-
-    return _ensure_chunk_token_limit(merged, chunk_token_num, delimiter, overlapped_percent)

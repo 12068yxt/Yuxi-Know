@@ -1,59 +1,11 @@
+"""逐题评估与指标聚合：检索指标、答案判定与整体得分。"""
+
 from collections.abc import Callable
 from typing import Any
 
 from yuxi.infrastructure.observability.logging import logger
 from yuxi.modules.knowledge.evaluation.metrics import EvaluationMetricsCalculator
 from yuxi.modules.knowledge.runtime import knowledge_base as kb_manager
-
-
-def normalize_query_result(query_result: Any) -> tuple[str, list[dict[str, Any]]]:
-    if isinstance(query_result, dict):
-        return query_result.get("answer", ""), query_result.get("retrieved_chunks", [])
-    if isinstance(query_result, list):
-        return "", query_result
-    return "", []
-
-
-def build_answer_prompt(query: str, retrieved_chunks: list[dict[str, Any]], max_docs: int = 5) -> str:
-    context_docs = []
-    for idx, chunk in enumerate(retrieved_chunks[:max_docs]):
-        content = chunk.get("content", "")
-        if content:
-            context_docs.append(f"文档 {idx + 1}:\n{content}")
-
-    context_text = "\n\n".join(context_docs)
-    return (
-        f"基于以下上下文信息，请回答用户的问题。\n\n"
-        f"上下文信息：{context_text}\n\n"
-        f"用户问题：{query}\n\n"
-        "请根据上下文信息准确回答问题。\n\n"
-        "如果上下文中缺少相关信息，请回答“信息不足，无法回答”。\n\n"
-    )
-
-
-async def generate_answer_if_needed(
-    *,
-    query: str,
-    generated_answer: str,
-    retrieved_chunks: list[dict[str, Any]],
-    retrieval_config: dict[str, Any],
-    select_model_fn: Callable[..., Any],
-) -> str:
-    if generated_answer:
-        return generated_answer
-    if not retrieved_chunks or not retrieval_config.get("answer_llm"):
-        return ""
-
-    logger.debug(f"使用 LLM {retrieval_config.get('answer_llm')} 生成答案...")
-    try:
-        llm = select_model_fn(model_spec=retrieval_config["answer_llm"])
-        response = await llm.call(build_answer_prompt(query, retrieved_chunks), stream=False)
-        generated_answer = response.content if response else ""
-        logger.debug(f"LLM 生成的答案长度: {len(generated_answer) if generated_answer else 0}")
-        return generated_answer
-    except Exception as e:
-        logger.error(f"LLM 生成答案失败: {e}")
-        return ""
 
 
 async def evaluate_question(
@@ -66,6 +18,7 @@ async def evaluate_question(
     judge_llm: Any | None,
     select_model_fn: Callable[..., Any],
 ) -> dict[str, Any]:
+    """检索单题答案并计算检索/答案指标，返回明细与分组得分。"""
     query = question_data["query"]
     query_result = await kb_manager.aquery(query, kb_id, **retrieval_config)
     generated_answer, retrieved_chunks = normalize_query_result(query_result)
@@ -117,6 +70,7 @@ def aggregate_metrics(
     *,
     include_overall_score: bool = False,
 ) -> tuple[dict[str, Any], float | None]:
+    """跨题目平均各指标，并按答案准确率/召回优先计算整体得分。"""
     overall_metrics = {}
 
     if retrieval_metrics_list:
@@ -133,3 +87,56 @@ def aggregate_metrics(
         overall_metrics["overall_score"] = overall_score
 
     return overall_metrics, overall_score
+
+
+async def generate_answer_if_needed(
+    *,
+    query: str,
+    generated_answer: str,
+    retrieved_chunks: list[dict[str, Any]],
+    retrieval_config: dict[str, Any],
+    select_model_fn: Callable[..., Any],
+) -> str:
+    """答案缺失且配置了答案模型时，基于检索上下文生成答案。"""
+    if generated_answer:
+        return generated_answer
+    if not retrieved_chunks or not retrieval_config.get("answer_llm"):
+        return ""
+
+    logger.debug(f"使用 LLM {retrieval_config.get('answer_llm')} 生成答案...")
+    try:
+        llm = select_model_fn(model_spec=retrieval_config["answer_llm"])
+        response = await llm.call(build_answer_prompt(query, retrieved_chunks), stream=False)
+        generated_answer = response.content if response else ""
+        logger.debug(f"LLM 生成的答案长度: {len(generated_answer) if generated_answer else 0}")
+        return generated_answer
+    except Exception as e:
+        logger.error(f"LLM 生成答案失败: {e}")
+        return ""
+
+
+def normalize_query_result(query_result: Any) -> tuple[str, list[dict[str, Any]]]:
+    """把检索结果归一为 (答案, 检索片段列表)。"""
+    if isinstance(query_result, dict):
+        return query_result.get("answer", ""), query_result.get("retrieved_chunks", [])
+    if isinstance(query_result, list):
+        return "", query_result
+    return "", []
+
+
+def build_answer_prompt(query: str, retrieved_chunks: list[dict[str, Any]], max_docs: int = 5) -> str:
+    """用前若干条检索片段构造答案生成的上下文提示。"""
+    context_docs = []
+    for idx, chunk in enumerate(retrieved_chunks[:max_docs]):
+        content = chunk.get("content", "")
+        if content:
+            context_docs.append(f"文档 {idx + 1}:\n{content}")
+
+    context_text = "\n\n".join(context_docs)
+    return (
+        f"基于以下上下文信息，请回答用户的问题。\n\n"
+        f"上下文信息：{context_text}\n\n"
+        f"用户问题：{query}\n\n"
+        "请根据上下文信息准确回答问题。\n\n"
+        "如果上下文中缺少相关信息，请回答“信息不足，无法回答”。\n\n"
+    )

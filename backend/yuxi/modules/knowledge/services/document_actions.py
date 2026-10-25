@@ -7,10 +7,6 @@ PENDING_PARSE_STATUSES = ["uploaded"]
 PENDING_INDEX_STATUSES = ["parsed", "error_indexing"]
 
 
-def _action_label(action: str) -> str:
-    return "解析" if action == "parse" else "入库"
-
-
 async def submit_document_action(
     *,
     kb_id: str,
@@ -75,3 +71,7 @@ async def submit_pending_document_action(
         "job_id": job.id,
         "queued_count": pending_count,
     }
+
+
+def _action_label(action: str) -> str:
+    return "解析" if action == "parse" else "入库"

@@ -17,6 +17,7 @@ def normalize_entity_name(text: str) -> str:
 
 
 def compute_entity_id(kb_id: str, normalized_name: str, label: str) -> str:
+    """按库、归一名与标签生成稳定实体 ID。"""
     return hashstr(f"{kb_id}:{normalized_name}:{label}", length=32)
 
 
@@ -28,6 +29,7 @@ def compute_triple_id(
     target_normalized_name: str,
     target_label: str,
 ) -> str:
+    """按库、两端实体与关系类型生成稳定三元组 ID。"""
     return hashstr(
         f"{kb_id}:{source_normalized_name}:{source_label}:{relation_type}:{target_normalized_name}:{target_label}",
         length=32,
@@ -35,10 +37,12 @@ def compute_triple_id(
 
 
 def graph_entity_collection_name(kb_id: str) -> str:
+    """实体向量集合命名。"""
     return f"{kb_id}_entity"
 
 
 def graph_triple_collection_name(kb_id: str) -> str:
+    """三元组向量集合命名。"""
     return f"{kb_id}_triple"
 
 
