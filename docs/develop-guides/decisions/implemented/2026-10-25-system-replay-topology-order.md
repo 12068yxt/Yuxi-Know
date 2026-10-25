@@ -44,4 +44,3 @@ Knowledge 关闭/恢复测试在共享重放启动前完成，两个共享进程
 - 同一 `test_public_session_initial_text_stream_and_saved_items[text-False]` 在显式设置 `OPENAI_REPLAY_URL=http://api:8765/v1`、`COOPERATION_REPLAY_URL=http://api:8766/v1` 后执行：缺少重放时 1 failed，39.04 秒，观察结果为 Turn 未在 30 秒内终结；重放恢复后 1 passed，3.38 秒，既有 HTTP、SSE 和持久 item 断言不变。
 
 旧[远端系统 run](https://github.com/xerrors/Yuxi/actions/runs/40175073856)的 worker 日志直接记录 OpenAI 连接失败，是连接根因的证据；本地 Turn 超时只是消费者观察结果，二者不互相替代。完整远端生命周期与后续容器链路仍须在新提交上执行。
-
