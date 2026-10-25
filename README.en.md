@@ -40,7 +40,7 @@ Yuxi application services run with Docker Compose; agent execution uses Cube use
 
 Install [Docker Engine](https://docs.docker.com/get-docker/) and Docker Compose, prepare a working LLM API, and prepare an x86_64 Linux/KVM execution node. The node needs `/dev/kvm`, admin access, Docker (to build the user template), and shared Workspace/Skills directories with the application host. Applications running on macOS or Windows also need access to this Linux/KVM node.
 
-This guide uses the `develop/0-8-0` branch. Version 0.8 requires a fresh deployment with separate data directories and provides no automatic upgrade of older databases, indexes, or file layouts. See the [0.8.0 release notes](docs/develop-guides/releases/0.8.0.md).
+This guide uses the `v0.8.0.beta3` candidate tag; a formal release is pending. Version 0.8 requires a fresh deployment with separate data directories and provides no automatic upgrade of older databases, indexes, or file layouts. See the [0.8.0 release notes](docs/develop-guides/releases/0.8.0.md).
 
 ### 1. Start the Cube Execution Node
 
@@ -51,7 +51,7 @@ Yuxi checks the Cube control plane, user template, and data proxy at startup; if
 ### 2. Get the Code and Initialize
 
 ```bash
-git clone --branch develop/0-8-0 --depth 1 https://github.com/xerrors/Yuxi.git
+git clone --branch v0.8.0.beta3 --depth 1 https://github.com/xerrors/Yuxi.git
 cd Yuxi
 ```
 

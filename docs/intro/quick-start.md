@@ -11,8 +11,10 @@ const sandbox = ref('container')
 
 ## 1. 下载代码
 
+本文固定使用 `v0.8.0.beta3` 候选标签，尚未正式发布。
+
 ```bash
-git clone --branch develop/0-8-0 --depth 1 https://github.com/xerrors/Yuxi.git
+git clone --branch v0.8.0.beta3 --depth 1 https://github.com/xerrors/Yuxi.git
 cd Yuxi
 ```
 

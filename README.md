@@ -40,7 +40,7 @@ Yuxi 是面向需要企业自部署的多用户 Agent 产品，且需要自己�
 
 安装 [Docker Engine](https://docs.docker.com/get-docker/) 和 Docker Compose，准备一个可用的大模型 API，并准备一台 x86_64 Linux/KVM 执行节点。节点需要 `/dev/kvm`、管理员权限、Docker（构建用户模板），以及与应用主机共享的 Workspace 和 Skills 目录。macOS/Windows 上运行应用也需要一台可访问的 Linux/KVM 节点。
 
-本教程使用 `develop/0-8-0` 分支。0.8 仅面向全新部署，旧数据库、索引和文件布局不提供自动升级；请用独立数据目录试用，见[0.8.0 更新说明](docs/develop-guides/releases/0.8.0.md)。
+本教程使用 `v0.8.0.beta3` 候选标签，尚未正式发布。0.8 仅面向全新部署，旧数据库、索引和文件布局不提供自动升级；请用独立数据目录试用，见[0.8.0 更新说明](docs/develop-guides/releases/0.8.0.md)。
 
 ### 1. 准备 Cube 执行节点
 
@@ -51,7 +51,7 @@ Yuxi 启动时会检查 Cube 控制面、用户模板和数据代理，检查失
 ### 2. 获取代码并初始化
 
 ```bash
-git clone --branch develop/0-8-0 --depth 1 https://github.com/xerrors/Yuxi.git
+git clone --branch v0.8.0.beta3 --depth 1 https://github.com/xerrors/Yuxi.git
 cd Yuxi
 ```
 

@@ -708,8 +708,8 @@ onBeforeUnmount(() => {
               <span>Terminal</span>
               <span>Docker Compose</span>
             </div>
-            <pre><code><span># 获取 0.8 源码</span>
-git clone --branch develop/0-8-0 --depth 1 \
+            <pre><code><span># 获取 0.8.0.beta3 候选源码</span>
+git clone --branch v0.8.0.beta3 --depth 1 \
   https://github.com/xerrors/Yuxi.git
 cd Yuxi
 
