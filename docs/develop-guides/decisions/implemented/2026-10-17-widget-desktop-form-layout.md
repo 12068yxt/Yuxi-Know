@@ -14,6 +14,8 @@ Owner：frontend/src/shared/ui/WidgetRenderer.vue
 
 WidgetRenderer 的样式让包含 Form 的默认 md 卡片使用所在正文宽度，保留显式 sm、lg 尺寸和非表单卡片。Form 使用随实际可用宽度排布的网格；当前桌面正文可容纳两列短字段，多行文本、三项以上单选、说明和现有 Row/Col 容器占整行，提交操作右对齐。WidgetNode 给多行字段添加呈现类。沿用现有颜色、原生表单、校验与提交链路，不新增协议字段或依赖。
 
+表单外观限定在最近 Card 的归属规则由[组件组合布局决定](./2026-10-25-widget-composition-layout.md)补充，Row/Col 不改变归属。
+
 chat-widgets 的表单示例使用 full 卡片与紧凑标题，说明集中在填写所需条件，必填由字段标记表达。历史消息由渲染器直接改善，新消息通过既有 Skill 按需读取获得相同引导。本变更不调整 ask_user_question 与 Form 的选择机制，不实现流式呈现。
 
 ## 替代方案

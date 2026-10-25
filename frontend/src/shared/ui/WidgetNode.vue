@@ -1,7 +1,7 @@
 <template>
   <form
     v-if="node.type === 'Form'"
-    class="widget-form"
+    class="widget-node widget-form"
     :style="nodeStyle"
     @input="formError = ''"
     @submit.prevent="submitForm"
@@ -88,7 +88,8 @@
     :class="[
       'widget-node',
       `widget-${node.type.toLowerCase()}`,
-      `widget-size-${node.size || 'md'}`
+      `widget-size-${node.size || 'md'}`,
+      { 'widget-form-card': isFormCard }
     ]"
     :style="nodeStyle"
     :role="node.type === 'ImageGroup' ? 'group' : undefined"
@@ -194,6 +195,16 @@ const icons = {
   'chevron-right': ChevronRight
 }
 const iconSizes = { xs: 14, sm: 16, md: 20, lg: 24, xl: 32 }
+const isFormCard = computed(() => props.node.type === 'Card' && ownsForm(props.node.children))
+
+/** 表单外观由最近的 Card 拥有，Row/Col 不改变归属。 */
+function ownsForm(children) {
+  return children.some(child =>
+    child.type === 'Form' ||
+    (child.type !== 'Card' && child.children && ownsForm(child.children))
+  )
+}
+
 const nodeStyle = computed(() => {
   const node = props.node
   const style = {}
@@ -210,10 +221,15 @@ const nodeStyle = computed(() => {
         around: 'space-around',
         evenly: 'space-evenly'
       }[node.justify] || node.justify
-  if (node.flex !== undefined) style.flex = node.flex === 'auto' ? '1 1 auto' : `${node.flex} 1 0%`
+  if (node.flex !== undefined) {
+    style.flexGrow = node.flex === 0 ? 0 : 1
+    style.flexShrink = 1
+    // 等分列保留 Row 的换行基准，非扩展列按内容计算宽度。
+    if (node.flex !== 1) style.flexBasis = 'auto'
+  }
   if (textTags[node.type]) {
     const sizes = {
-      Title: { xs: 16, sm: 18, md: 20, lg: 24, xl: 28, '2xl': 32 },
+      Title: { xs: 12, sm: 14, md: 16, lg: 18, xl: 20, '2xl': 24 },
       Text: { xs: 12, sm: 13, md: 14, lg: 16, xl: 18 },
       Caption: { sm: 11, md: 12, lg: 13 }
     }[node.type]

@@ -24,6 +24,8 @@ Owner：frontend/src/shared/lib/chatWidgets.js
 
 `MarkdownPreview.vue` 在正式聊天显式启用时挂载组件，相同 JSON 与闭合状态的 DOM 在正文追加、主题和行号变化时复用；定义改变后重建。JSON 保留原始文本，弯引号修复只作用于围栏外；引用行定位沿原 Markdown Owner。`SessionWorkspace.vue` 经普通消息和折叠过程组传递 compose 动作，将动作文字追加到草稿并聚焦，用户发送后走既有 Input 链路。整组生成期间控件只读，较早闭合消息也遵循该边界。
 
+嵌套容器的宽度、列表外观和列换行由[组件组合布局决定](./2026-10-25-widget-composition-layout.md)补充。
+
 组件属于 Turn 的 result_run_id 指向的最终公开 Message，刷新由历史恢复。Skill 要求完成查询及工具调用后，在最终回复保留完整组件；不把过程图表移入最终答案，不从相邻 Run 或前端预置数据补结果。天气等时效请求必须实际取数；搜索失败可以沿既有只读网络查询和审批协议更换公开来源，全部渠道失败则说明缺失，不生成假天气。逐日极值优先使用 daily 字段，小时采样使用采样标签；日期、单位、来源 URL 与文字解释分别核对。
 
 浅色使用白色卡片、细边框和轻阴影，深色使用炭灰卡片、细边框，复用 Yuxi 语义颜色、字体和全局主题。公开示例页、示例数据与本次新增专项测试脚本不属于交付；使用入口为普通 Agent 对话，方法由[Skills 管理](../../../agents/skills-management.md#对话组件-skill)拥有。对话 HTML Preview 的移除由[对应决定](2026-10-12-remove-inline-html-preview.md)维护。

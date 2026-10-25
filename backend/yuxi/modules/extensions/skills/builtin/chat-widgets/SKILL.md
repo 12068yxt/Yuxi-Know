@@ -1,7 +1,7 @@
 ---
 name: chat-widgets
 description: "在普通聊天中直接展示图片、图文卡片和数值图表，或用简短表单收集用户回答。展示图片或截图时优先 Image/ImageGroup；图片需要配合说明、参数或比较时组合 Card、Row、Col；分类比较用柱状图，时间趋势用折线图；需要填写多个条件时用 Form、文本输入、单选和日期。按用途主动读取本 Skill，无需用户指定组件或 JSON；普通文字回答保持 Markdown。"
-version: "2026.10.17.1"
+version: "2026.10.25.1"
 ---
 
 # 对话组件
@@ -197,14 +197,14 @@ version: "2026.10.17.1"
 
 | 组件 | 属性与用途 |
 |---|---|
-| Card | `children`；可选 `size`：sm、md（默认，最大 440px，包含 Form 时使用正文宽度）、lg、full；`padding` |
+| Card | `children`；可选 `size`：sm、md（默认）、lg、full；`padding`。独立 md 最大 440px，嵌套 md 随父容器铺满；表单布局属于最近的 Card，可通过 Row/Col 包含 Form；该 Card 的 md 使用所在容器宽度 |
 | Form | `children`、`onSubmitAction`；可选 `gap`、`padding`、`align`、`justify`、`flex`；不能嵌套 Form |
 | Input、Textarea | `name`、`label`；可选 `placeholder`、`defaultValue`、`required`、`disabled`；Textarea 可选 `rows`：2–8 |
 | RadioGroup | `name`、`label`、`options`（1–20 个 `{label,value}`，value 互不重复）；可选 `defaultValue`、`required`、`disabled` |
 | DatePicker | `name`、`label`；可选 `defaultValue`、`min`、`max`（均为 YYYY-MM-DD）、`required`、`disabled` |
 | Button | `label`；表单内 `submit:true`，独立使用 `onClickAction`；可选 `style`：primary、secondary，`variant`：solid、soft、outline、ghost，`size`：sm、md、lg，`pill`、`block`、`disabled`、`iconStart`、`iconEnd`（名称同 Icon） |
 | Row、Col | `children`；可选 `gap`、`padding`、`align`、`justify`、`flex`；Row 在窄屏换行 |
-| ListView | `children`，只放 ListViewItem |
+| ListView | `children`，只放 ListViewItem；嵌套时随父容器铺满并省去重复外框 |
 | ListViewItem | `children`；可选 `gap`、`align`、`onClickAction`；有动作时整行可点击，内部只能放非交互组件 |
 | Title、Text、Caption | `value`；可选 `size`、`weight`、`textAlign`、`color` |
 | Badge | `label`；可选 `color`：secondary、success、warning、danger、info；`variant`：solid、soft（默认）、outline；`size`：sm、md、lg；`pill` |
@@ -214,7 +214,7 @@ version: "2026.10.17.1"
 | Icon | `name`：book-open、document、lightbulb、info、check、plus、search、chevron-right；可选 `size`：xs、sm、md、lg、xl；`color` |
 | Divider、Spacer | 只有 `type`；分割线、弹性空白 |
 
-`gap`、`padding` 为 0–8 整数，每单位 4px。`align` 为 start、center、end、baseline、stretch；`justify` 为 start、center、end、between、around、evenly；`flex` 为 0、1、"auto"。不要使用像素字符串、任意颜色或 CSS 对象。
+`gap`、`padding` 为 0–8 整数，每单位 4px。`align` 为 start、center、end、baseline、stretch；`justify` 为 start、center、end、between、around、evenly；`flex` 为 0、1、"auto"：0 按内容占宽且不扩展，1 分配剩余空间并保留列的换行基准，"auto" 按内容参与伸缩。不要使用像素字符串、任意颜色或 CSS 对象。
 
 需要让标题占满一行剩余空间时，把 Title 放在 `{"type":"Col","flex":1,"children":[...]}` 中；文字组件保留文本属性，布局属性由外层 Row/Col 承载。
 
