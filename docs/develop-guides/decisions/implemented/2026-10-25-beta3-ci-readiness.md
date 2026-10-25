@@ -1,4 +1,4 @@
-# 0.8.0 beta3 的 CI 验收与 main 合入边界
+# 0.8.0 beta3 的 CI 验收与 main 切换边界
 
 状态：implemented
 类型：process
@@ -14,19 +14,21 @@ Owner：scripts/bump-version.sh
 
 版本脚本同步应用、锁文件、Compose、sandbox runner 与集成测试的默认镜像及容器沙盒文档示例至 `0.8.0.beta3`。源码获取入口继续指向 `develop/0-8-0`。脚本在普通升级中同步沙盒文档，`--dev` 只同步代码与测试默认值，保留公开文档版本。初始化集成测试明确回读 business 1、knowledge 2；补投替身返回实际投递接口的成功值；MCP 故障 E2E 使用当前注册的 `ocr_parse_file` 依赖，继续验证故障 Skill 不向模型暴露其工具、普通聊天完成及数据库和事件中的告警。知识评估 service 的既有显式导出按 Ruff 排序要求分组，保留导出身份。
 
-保留现有 workflow、路径过滤和结果断言。开发分支推送后的检查必须归属同一个候选提交，全部通过才创建并推送 `v0.8.0.beta3`，同时核对 tag 触发的检查。不创建 GitHub Release、不上传 npm、不合并 main。main 的独有修复、合并冲突、文档缺口和生产部署边界先通过只读比较核对。
+保留现有 workflow、路径过滤和结果断言。开发分支推送后的检查必须归属同一个候选提交，全部通过才创建并推送 `v0.8.0.beta3`，同时核对 tag 触发的检查。不创建 GitHub Release、不上传 npm。维护者指定 main 直接替换为最终验收的开发分支提交，不采用合并方式；候选准备阶段只核对切换目标、远端保护和文档部署边界，尚未更新 main。
 
 ## 替代方案
 
 - 降低断言或跳过失败测试：不能验证当前初始化、队列和 MCP 故障语义。
 - 仅对 beta2 提交新增 beta3 标签：应用版本和标签不一致。
-- 直接合入 main：main 会触发文档部署，且开发分支尚未核对 main 的独有修复。
+- 合并开发分支到 main：不符合维护者指定的直接替换策略，额外引入合并结果与冲突处理。
 
 ## 后果
 
-候选版本与正式发布分离。`main` 的独有修复涉及 Skill 展示名导入、镜像文件权限、首次 bind 目录创建、README 图片与 OCR 禁用。开发分支已有部分等价或替代实现，合并时需按行为保留并验证，不能按目录改名机械选择一侧。
+候选版本与正式发布分离。main 切换后的源码以最终验收提交为准，旧 main 的独有提交不通过合并带入。准备阶段读取的旧 main 为 `928141ce`；实际替换前仍需重新读取远端 SHA，并按该值使用 lease 保护，避免覆盖并发提交。远端 force-push 保护的允许范围须在执行替换前核对。
 
-在 `8d8e8536` 与 `origin/main` 的 `928141ce` 上执行 `git merge-tree --write-tree --name-only origin/main HEAD`，返回 1 并报告 13 个冲突，集中于 Skill 导入、OCR、Compose、Dockerfile 和相关前端与测试；预演不改变分支与工作区。后续合入准备需先核对这些行为并解决冲突，再对合并结果重跑 CI。文档发布页仍明确截至 `97e04174`，其中历史 Schema 说明不覆盖当前 knowledge v2；正式 release 前需补齐文档。main push 会部署文档站，须在合入前确认文档可以公开。
+只读检查确认仓库规则 `Protect main from force push`（21189549）对 `refs/heads/main` 启用 non-fast-forward 与删除保护，当前没有 bypass actor；当前凭据为 ADMIN 也不等于已配置绕过。直接替换前需要单独处理该规则的允许范围；候选准备没有修改保护规则或 main。
+
+直接替换不需要处理合并预演中的 13 个冲突。文档发布页仍明确截至 `97e04174`，其中历史 Schema 说明不覆盖当前 knowledge v2；正式 release 前需补齐文档。main push 会部署文档站，切换准备需要考虑这一外部副作用。
 
 ## 验证
 
@@ -54,4 +56,4 @@ Owner：scripts/bump-version.sh
 
 ## 风险
 
-CI 的 container 拓扑不证明 Cube/KVM、外部供应商或真实数据迁移可用。文档构建成功不代表文档完整，main 合入与正式 release 保持独立。版本同步改变沙盒镜像默认值，不改变业务流程；本地 MCP E2E 使用当前开发服务，候选镜像构建与完整 container 拓扑仍由远端系统检查验证。
+CI 的 container 拓扑不证明 Cube/KVM、外部供应商或真实数据迁移可用。文档构建成功不代表文档完整，main 切换与正式 release 保持独立。版本同步改变沙盒镜像默认值，不改变业务流程；本地 MCP E2E 使用当前开发服务，候选镜像构建与完整 container 拓扑仍由远端系统检查验证。

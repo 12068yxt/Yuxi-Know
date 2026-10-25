@@ -180,6 +180,30 @@ class ServiceIntegrationTests(unittest.TestCase):
 class RuntimeTopologyTests(unittest.TestCase):
     """常规系统拓扑使用 container，真实 Cube 只由手动探针验证。"""
 
+    def assert_replay_starts_after_knowledge_switch(self, workflow: str) -> None:
+        """共享重放属于 API 容器，启动后不能再被 Knowledge 开关测试重建。"""
+        self.assertLess(
+            workflow.index("      - name: Verify optional Knowledge deployment and chat recovery"),
+            workflow.index("      - name: Start deterministic OpenAI-compatible replay"),
+            "Knowledge 拓扑切换必须先于共享模型重放启动",
+        )
+
+    def test_replay_starts_after_knowledge_switch(self):
+        """实际工作流必须先完成会重建 API 的 Knowledge 开关测试。"""
+        self.assert_replay_starts_after_knowledge_switch((ROOT / ".github/workflows/system-tests.yml").read_text())
+
+    def test_knowledge_switch_after_replay_is_rejected(self):
+        """恢复启动重放后重建 API 的旧顺序时，约束必须失败。"""
+        workflow = (ROOT / ".github/workflows/system-tests.yml").read_text()
+        start = workflow.index("      - name: Verify optional Knowledge deployment and chat recovery")
+        end = workflow.index("      - name:", start + 1)
+        switch = workflow[start:end]
+        without_switch = workflow[:start] + workflow[end:]
+        lifecycle = without_switch.index("      - name: Verify deterministic Agent lifecycle")
+        broken = without_switch[:lifecycle] + switch + without_switch[lifecycle:]
+        with self.assertRaisesRegex(AssertionError, "Knowledge 拓扑切换必须先于共享模型重放启动"):
+            self.assert_replay_starts_after_knowledge_switch(broken)
+
     def assert_hosted_jobs(self, workflow: str) -> None:
         """两个 job 均准备 container 镜像和 runner，保留构建缓存。"""
         jobs = re.split(r"(?m)^  [\w-]+:\n", workflow.split("\njobs:\n", 1)[1])[1:]
