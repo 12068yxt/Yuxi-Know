@@ -118,6 +118,29 @@ def _runtime(
 
 
 @pytest.mark.asyncio
+async def test_ocr_parse_file_downloads_and_parses_real_docx(workspace_root, monkeypatch):
+    """真实下载要求既有目标文件，解析后的正文必须落入 Workdir。"""
+    from docx import Document
+
+    _mock_system_options(monkeypatch)
+    source = workspace_root / "projects/11111111-1111-4111-8111-111111111111/uploads/input.docx"
+    source.parent.mkdir(parents=True)
+    document = Document()
+    document.add_paragraph("OCR COPY REGRESSION 文档正文")
+    document.save(source)
+
+    result = await ocr_parse_file.coroutine(
+        file_path=f"/home/user/workspace/{source.relative_to(workspace_root)}",
+        runtime=_runtime(),
+        ocr_engine="disable",
+    )
+
+    output = workspace_root / result["parsed_path"].removeprefix("/home/user/workspace/")
+    assert "OCR COPY REGRESSION 文档正文" in output.read_text()
+    assert source.is_file()
+
+
+@pytest.mark.asyncio
 async def test_ocr_parse_file_writes_markdown_to_outputs(tmp_path, workspace_root, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("YUXI_USER_DATA_DIR", str(tmp_path / "threads"))
     _mock_system_options(monkeypatch)
