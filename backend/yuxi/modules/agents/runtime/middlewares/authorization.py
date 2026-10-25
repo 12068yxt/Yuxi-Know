@@ -46,9 +46,9 @@ class RuntimeAuthorizationMiddleware(AgentMiddleware):
         return await handler(request.override(tools=tools))
 
     async def awrap_tool_call(self, request, handler):
-        """Agent 失权终止，依赖失权返回不含资源信息的错误；工具边界不重建资源与投影。"""
+        """按当前资源拒绝失权工具，不重建 Skill 文件投影。"""
         context = request.runtime.context
-        mcp_policy = await _execution_mcp_policy(context, state=request.state)
+        mcp_policy = await _refresh_execution_resources(context, state=request.state)
         name = request.tool_call["name"]
         if not tool_allowed(context, name, request.state, mcp_policy):
             return ToolMessage(content="能力受限：当前调用者无权使用该工具。", tool_call_id=request.tool_call["id"], status="error")
@@ -122,7 +122,7 @@ async def refresh_execution_authorization(context, *, state=None) -> dict[str, s
 
 
 async def _refresh_execution_resources(context, *, state=None) -> dict[str, set[str]]:
-    """模型边界刷新上下文资源与 Skill 快照，并解析当前 MCP 策略。"""
+    """模型与工具边界刷新资源和 Skill 快照，并解析当前 MCP 策略。"""
     async with pg_manager.get_async_session_context() as db:
         user, agent, _ = await _require_execution_actor(context, db=db)
         await refresh_agent_context_resources(context, db=db, user=user, agent=agent)
@@ -130,7 +130,7 @@ async def _refresh_execution_resources(context, *, state=None) -> dict[str, set[
 
 
 async def _execution_mcp_policy(context, *, state=None) -> dict[str, set[str]]:
-    """工具与摘要边界只复查身份并解析 MCP 策略；资源与 Skill 快照由模型边界刷新。"""
+    """实际模型与摘要请求复查身份并解析 MCP 策略。"""
     async with pg_manager.get_async_session_context() as db:
         user, _, _ = await _require_execution_actor(context, db=db)
         return await _resolve_mcp_policy(context, db=db, user=user, state=state)

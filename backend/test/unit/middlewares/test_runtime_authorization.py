@@ -219,7 +219,7 @@ async def test_mcp_failure_becomes_safe_tool_result_and_disables_service(monkeyp
     from yuxi.shared.errors import StateConflictError
 
     context.mcps, context.mcp_unavailable, context.run_id = ["remote"], {}, "run"
-    monkeypatch.setattr(authorization, "_execution_mcp_policy", AsyncMock(return_value={"remote": set()}))
+    monkeypatch.setattr(authorization, "_refresh_execution_resources", AsyncMock(return_value={"remote": set()}))
     request = SimpleNamespace(
         runtime=SimpleNamespace(context=context),
         state={},
@@ -316,7 +316,7 @@ async def test_mcp_tool_preserves_execution_control_exceptions(monkeypatch, cont
         "cancelled": asyncio.CancelledError(),
     }[kind]
     context.mcps, context.mcp_unavailable = ["remote"], {}
-    monkeypatch.setattr(authorization, "_execution_mcp_policy", AsyncMock(return_value={"remote": set()}))
+    monkeypatch.setattr(authorization, "_refresh_execution_resources", AsyncMock(return_value={"remote": set()}))
     request = SimpleNamespace(runtime=SimpleNamespace(context=context), state={}, tool_call={"name": "remote_tool", "id": "call"})
     with pytest.raises(type(failure)):
         await authorization.RuntimeAuthorizationMiddleware().awrap_tool_call(request, AsyncMock(side_effect=failure))
@@ -362,8 +362,8 @@ async def test_warning_checkpoint_is_replaced_after_capability_recovers(monkeypa
 
 
 @pytest.mark.asyncio
-async def test_tool_boundary_rechecks_identity_without_rebuilding_resources(monkeypatch, context):
-    """工具边界复查身份与 MCP 策略，但资源重建与投影同步只在模型边界发生。"""
+async def test_tool_boundary_refreshes_resources_without_syncing_projection(monkeypatch, context):
+    """工具边界刷新授权资源与 MCP 策略，不重建文件投影。"""
     from unittest.mock import AsyncMock
     from yuxi.modules.agents.runtime.middlewares import authorization
 
@@ -399,4 +399,4 @@ async def test_tool_boundary_rechecks_identity_without_rebuilding_resources(monk
     )
     assert result == "工具继续执行"
     assert actor.await_count == 1
-    assert resources.await_count == 0 and sync.await_count == 0
+    assert resources.await_count == 1 and sync.await_count == 0

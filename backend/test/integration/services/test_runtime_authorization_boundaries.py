@@ -365,7 +365,7 @@ async def test_shipping_graph_checks_nested_mcp_without_discovering_inactive_too
     async with fixture.sessions() as db:
         parent = await db.scalar(select(Skill).where(Skill.slug == "live-skill"))
         parent.skill_dependencies = ["nested-skill"]
-        parent.tool_dependencies = ["list_kbs"]
+        parent.tool_dependencies = ["ocr_parse_file"]
         db.add_all(
             [
                 Skill(
@@ -410,5 +410,5 @@ async def test_shipping_graph_checks_nested_mcp_without_discovering_inactive_too
     result = await graph.ainvoke({"messages": [HumanMessage(content="hello")], "activated_skills": ["live-skill"]}, context=context)
     assert result["messages"][-1].content == "AUTHORIZATION_OK"
     assert len(model.requests) == 1
-    assert ("list_kbs" in {tool.name for tool in model.bound_tools}) is enabled
+    assert ("ocr_parse_file" in {tool.name for tool in model.bound_tools}) is enabled
     assert context.mcp_tool_servers == {}
