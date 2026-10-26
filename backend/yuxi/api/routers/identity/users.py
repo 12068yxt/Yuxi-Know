@@ -225,7 +225,5 @@ async def get_message_activity(
     db: AsyncSession = Depends(get_db),
 ):
     """统计当前用户近一年的消息活动，仅返回本人数据。"""
-    daily = await MessageRepository(db).count_daily_activity(
-        uid=current_user.uid, days=MESSAGE_ACTIVITY_WINDOW_DAYS
-    )
+    daily = await MessageRepository(db).count_daily_activity(uid=current_user.uid, days=MESSAGE_ACTIVITY_WINDOW_DAYS)
     return {"window_days": MESSAGE_ACTIVITY_WINDOW_DAYS, "daily_message_counts": daily}
