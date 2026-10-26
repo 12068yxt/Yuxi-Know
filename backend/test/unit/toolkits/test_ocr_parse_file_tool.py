@@ -123,6 +123,14 @@ async def test_ocr_parse_file_downloads_and_parses_real_docx(workspace_root, mon
     from docx import Document
 
     _mock_system_options(monkeypatch)
+    # 该用例只触达 Workspace 挂载，执行后端不应被唤醒或要求其部署配置。
+    import yuxi.modules.agents.runtime.sandbox.backend as backend_module
+
+    class NoProvider:
+        def __getattr__(self, key):
+            raise AssertionError(f"workspace-only IO must not wake the provider: {key}")
+
+    monkeypatch.setattr(backend_module, "get_sandbox_provider", lambda: NoProvider())
     source = workspace_root / "projects/11111111-1111-4111-8111-111111111111/uploads/input.docx"
     source.parent.mkdir(parents=True)
     document = Document()
