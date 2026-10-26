@@ -169,12 +169,12 @@ class UserSandboxBackend(BaseSandbox):
         return await await_io(asyncio.to_thread(self.read, file_path, offset, limit))
 
     def write(self, file_path: str, content: str) -> WriteResult:
-        """仅新建文本文件，共享 Skills 的写入直接拒绝。"""
+        """整体写入文本文件，已存在文件按工具契约覆盖；共享 Skills 的写入直接拒绝。"""
         try:
             path = normalize_runtime_path(file_path)
             if not isinstance(content, str):
                 raise ValueError("write() only supports text content")
-            self._write_bytes(path, content.encode(), overwrite=False)
+            self._write_bytes(path, content.encode(), overwrite=True)
             return WriteResult(path=path)
         except Exception as exc:
             return WriteResult(error=self._file_error(file_path, exc))

@@ -89,12 +89,12 @@
           class="item btn"
           @click="referenceStore.load(threadId, msg.turn_id)"
         >来源加载失败，重试</button>
-        <span
+        <button
           v-if="hasSources && showKey('sources')"
+          type="button"
           class="item btn sources-btn"
-          :class="{ expanded: isSourcesExpanded }"
-          @click="toggleSources"
-          :title="isSourcesExpanded ? '收起详情' : '查看来源详情'"
+          :title="'在侧边栏查看来源详情'"
+          @click="openSourcesPanel"
         >
           <BookOpen size="12" />
           <span class="sources-label">
@@ -103,8 +103,7 @@
               {{ sourceCount }}
             </template>
           </span>
-          <ChevronDown :size="12" class="expand-icon" :class="{ rotated: isSourcesExpanded }" />
-        </span>
+        </button>
       </div>
     </div>
 
@@ -130,12 +129,6 @@
     <p v-else-if="referenceEntry?.references && referenceEntry.visible && !referenceEntry.references.citations.length" class="reference-notice" role="status">
       未找到支持回答的引用片段
     </p>
-
-    <!-- 来源详情面板 -->
-    <div v-if="isSourcesExpanded" class="sources-panel-body">
-      <KnowledgeSourceSection v-if="knowledgeChunks.length > 0" :chunks="knowledgeChunks" />
-      <WebSearchSourceSection v-if="webSources.length > 0" :sources="webSources" />
-    </div>
   </div>
 
 </template>
@@ -152,13 +145,10 @@ import {
   Check,
   RotateCcw,
   BookOpen,
-  ChevronDown,
   Quote,
   LoaderCircle
 } from '@lucide/vue'
 import { formatChatTime } from '@/shared/lib/time'
-import KnowledgeSourceSection from '@/modules/agents/ui/KnowledgeSourceSection.vue'
-import WebSearchSourceSection from '@/modules/agents/ui/WebSearchSourceSection.vue'
 import UserFeedbackModal from '@/modules/session/ui/UserFeedbackModal.vue'
 import { formatRunTimingDuration, getRunTotalLatencyMs } from '@/modules/session/model/runTiming'
 import { useTurnReferencesStore } from '@/modules/session/model/turnReferences'
@@ -211,8 +201,6 @@ watch(
 )
 
 // Sources state
-const isSourcesExpanded = ref(false)
-
 const knowledgeChunks = computed(() => {
   if (!referenceEntry.value?.loaded) {
     return Array.isArray(props.sources?.knowledgeChunks) ? props.sources.knowledgeChunks : []
@@ -242,8 +230,13 @@ const hasSources = computed(() => knowledgeChunks.value.length > 0 || webSources
 
 const sourceCount = computed(() => knowledgeChunks.value.length + webSources.value.length)
 
-const toggleSources = () => {
-  isSourcesExpanded.value = !isSourcesExpanded.value
+/** 来源详情统一在右侧栏展示，附带当前回退数据供标注接口缺失时兜底。 */
+const openSourcesPanel = () => {
+  emit('openRefs', {
+    turnId: msg.value?.turn_id || '',
+    knowledgeChunks: knowledgeChunks.value,
+    webSources: webSources.value
+  })
 }
 
 // 对话结束时间 / 执行耗时切换
@@ -371,7 +364,7 @@ async function rate(rating, event) {
 
 <style lang="less" scoped>
 .reference-action {
-  border: 0;
+  border: 1px solid transparent;
   background: transparent;
   font: inherit;
   &:disabled { cursor: wait; opacity: 0.6; }
@@ -442,24 +435,14 @@ async function rate(rating, event) {
         background: var(--gray-100);
       }
 
-      &.expanded {
-        background: var(--main-50);
-        color: var(--main-700);
-        border-color: var(--main-100);
+      &:focus-visible {
+        outline: 2px solid var(--main-500);
+        outline-offset: 2px;
       }
 
       .sources-label {
         font-weight: 500;
         margin-left: 2px;
-      }
-
-      .expand-icon {
-        margin-left: 4px;
-        transition: transform 0.2s ease;
-
-        &.rotated {
-          transform: rotate(180deg);
-        }
       }
     }
 
@@ -489,17 +472,6 @@ async function rate(rating, event) {
     opacity: 1;
     visibility: visible;
   }
-
-  .sources-panel-body {
-    background: var(--gray-25);
-    border: 1px solid var(--gray-150);
-    border-radius: 8px;
-    padding: 12px;
-    display: flex;
-    flex-direction: column;
-    gap: 12px;
-    animation: slideDown 0.2s ease-out;
-  }
 }
 
 .refs .feedback-vote {
@@ -511,15 +483,4 @@ async function rate(rating, event) {
 }
 .feedback-error { color: var(--color-error-500); margin: 0; }
 .feedback-status { font-size: 12px; }
-
-@keyframes slideDown {
-  from {
-    opacity: 0;
-    transform: translateY(-8px);
-  }
-  to {
-    opacity: 1;
-    transform: translateY(0);
-  }
-}
 </style>

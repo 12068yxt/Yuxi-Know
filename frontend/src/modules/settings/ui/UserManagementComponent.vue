@@ -42,22 +42,6 @@
           <a-select-option value="end_user">APP 终端用户</a-select-option>
           <a-select-option value="all">全部用户类型</a-select-option>
         </a-select>
-        <a-select v-model:value="userManagement.departmentFilter" class="filter-select">
-          <a-select-option value="">全部部门</a-select-option>
-          <a-select-option
-            v-for="dept in departmentFilterOptions"
-            :key="dept.value"
-            :value="dept.value"
-          >
-            {{ dept.label }}
-          </a-select-option>
-        </a-select>
-        <a-select v-model:value="userManagement.roleFilter" class="filter-select">
-          <a-select-option value="">全部权限</a-select-option>
-          <a-select-option value="superadmin">超级管理员</a-select-option>
-          <a-select-option value="admin">管理员</a-select-option>
-          <a-select-option value="user">普通用户</a-select-option>
-        </a-select>
       </div>
     </div>
 
@@ -78,6 +62,75 @@
               table-layout="fixed"
               :scroll="{ x: 760 }"
             >
+              <template #headerCell="{ column }">
+                <template v-if="column.key === 'role' && showHeaderFilter">
+                  <div class="header-filter-cell">
+                    <span>角色</span>
+                    <a-popover trigger="click" placement="bottomRight">
+                      <template #content>
+                        <div class="header-filter-panel">
+                          <a-checkbox-group
+                            v-model:value="userManagement.roleFilterValues"
+                            class="header-filter-options"
+                            :options="roleFilterOptions"
+                          />
+                          <button
+                            type="button"
+                            class="header-filter-clear"
+                            :disabled="!userManagement.roleFilterValues.length"
+                            @click="userManagement.roleFilterValues = []"
+                          >
+                            清空筛选
+                          </button>
+                        </div>
+                      </template>
+                      <button
+                        type="button"
+                        class="header-filter-btn"
+                        :class="{ active: userManagement.roleFilterValues.length }"
+                        :aria-label="`筛选角色（已选 ${userManagement.roleFilterValues.length} 项）`"
+                      >
+                        <ListFilter :size="14" />
+                      </button>
+                    </a-popover>
+                  </div>
+                </template>
+                <template v-else-if="column.key === 'department' && showHeaderFilter">
+                  <div class="header-filter-cell">
+                    <span>所属部门/实例</span>
+                    <a-popover trigger="click" placement="bottomRight">
+                      <template #content>
+                        <div class="header-filter-panel">
+                          <template v-if="departmentFilterOptions.length">
+                            <a-checkbox-group
+                              v-model:value="userManagement.departmentFilterValues"
+                              class="header-filter-options"
+                              :options="departmentFilterOptions"
+                            />
+                          </template>
+                          <div v-else class="header-filter-empty">暂无可筛选的部门</div>
+                          <button
+                            type="button"
+                            class="header-filter-clear"
+                            :disabled="!userManagement.departmentFilterValues.length"
+                            @click="userManagement.departmentFilterValues = []"
+                          >
+                            清空筛选
+                          </button>
+                        </div>
+                      </template>
+                      <button
+                        type="button"
+                        class="header-filter-btn"
+                        :class="{ active: userManagement.departmentFilterValues.length }"
+                        :aria-label="`筛选部门（已选 ${userManagement.departmentFilterValues.length} 项）`"
+                      >
+                        <ListFilter :size="14" />
+                      </button>
+                    </a-popover>
+                  </div>
+                </template>
+              </template>
               <template #bodyCell="{ column, record }">
                 <template v-if="column.key === 'user'">
                   <div class="user-table-cell">
@@ -282,7 +335,7 @@ import { reactive, ref, onMounted, onUnmounted, watch, computed } from 'vue'
 import { message, Modal } from 'ant-design-vue'
 import { useUserStore } from '@/modules/identity'
 import { authApi, departmentApi } from '@/apis'
-import { Plus, SquarePen, Trash2, User, UserLock, UserStar, RefreshCw, Search } from '@lucide/vue'
+import { Plus, SquarePen, Trash2, User, UserLock, UserStar, RefreshCw, Search, ListFilter } from '@lucide/vue'
 import { formatDateTime } from '@/shared/lib/time'
 import { isPasswordLongEnough, MIN_PASSWORD_LENGTH } from '@/modules/identity'
 import FallbackAvatar from '@/shared/ui/FallbackAvatar.vue'
@@ -314,8 +367,8 @@ const userManagement = reactive({
   users: [],
   total: 0,
   searchKeyword: '',
-  departmentFilter: '',
-  roleFilter: '',
+  departmentFilterValues: [],
+  roleFilterValues: [],
   userKindFilter: 'human',
   currentPage: 1,
   pageSize: 20,
@@ -346,10 +399,24 @@ const departmentManagement = reactive({
 const hasActiveFilters = computed(
   () =>
     Boolean(userManagement.searchKeyword.trim()) ||
-    Boolean(userManagement.departmentFilter) ||
-    Boolean(userManagement.roleFilter) ||
+    userManagement.departmentFilterValues.length > 0 ||
+    userManagement.roleFilterValues.length > 0 ||
     userManagement.userKindFilter !== 'human'
 )
+
+// APP 终端用户没有部门与产品角色，表头筛选只在系统用户视图提供；切换视图时清空不可见筛选。
+const showHeaderFilter = computed(() => userManagement.userKindFilter !== 'end_user')
+watch(showHeaderFilter, (visible) => {
+  if (visible) return
+  userManagement.departmentFilterValues = []
+  userManagement.roleFilterValues = []
+})
+
+const roleFilterOptions = [
+  { label: '超级管理员', value: 'superadmin' },
+  { label: '管理员', value: 'admin' },
+  { label: '普通用户', value: 'user' }
+]
 
 const departmentFilterOptions = computed(() => {
   const options = new Map()
@@ -362,17 +429,15 @@ const departmentFilterOptions = computed(() => {
   })
 
   userManagement.users.forEach((user) => {
-    const departmentId = user.department_id
-    const departmentName = user.department_name
+    // 部门筛选走后端 department_ids 数字契约，缺 id 的记录（仅名称回退）不可作为筛选项。
+    if (user.department_id == null) return
 
-    if (departmentId == null && !departmentName) return
-
-    const value = String(departmentId ?? departmentName)
+    const value = String(user.department_id)
 
     if (!options.has(value)) {
       options.set(value, {
         value,
-        label: departmentName || `部门 ${departmentId}`
+        label: user.department_name || `部门 ${user.department_id}`
       })
     }
   })
@@ -468,12 +533,13 @@ watch(
 
 let filterRequestTimer = null
 watch(
-  () => [userManagement.searchKeyword, userManagement.departmentFilter, userManagement.roleFilter, userManagement.userKindFilter],
+  () => [userManagement.searchKeyword, userManagement.departmentFilterValues, userManagement.roleFilterValues, userManagement.userKindFilter],
   () => {
     userManagement.currentPage = 1
     if (filterRequestTimer) clearTimeout(filterRequestTimer)
     filterRequestTimer = setTimeout(() => fetchUsers(), 250)
-  }
+  },
+  { deep: true }
 )
 
 // 格式化时间显示
@@ -498,8 +564,8 @@ const fetchUsers = async () => {
       offset: (userManagement.currentPage - 1) * pageSize,
       limit: pageSize,
       search: userManagement.searchKeyword.trim(),
-      departmentId: userManagement.departmentFilter,
-      role: userManagement.roleFilter,
+      departmentIds: userManagement.departmentFilterValues,
+      roles: userManagement.roleFilterValues,
       userKind: userManagement.userKindFilter
     })
     if (requestId !== latestUserRequest) return
@@ -879,6 +945,91 @@ onUnmounted(() => {
     &.admin {
       background: var(--main-30);
       color: var(--main-color);
+    }
+  }
+
+  .header-filter-cell {
+    display: flex;
+    align-items: center;
+    gap: 2px;
+
+    > span {
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+  }
+
+  .header-filter-btn {
+    display: inline-flex;
+    flex-shrink: 0;
+    align-items: center;
+    justify-content: center;
+    width: 22px;
+    height: 22px;
+    padding: 0;
+    border: 0;
+    border-radius: 5px;
+    background: transparent;
+    color: var(--gray-400);
+    cursor: pointer;
+
+    &:hover {
+      background: var(--gray-100);
+      color: var(--gray-700);
+    }
+
+    &.active {
+      color: var(--main-color);
+    }
+
+    &:focus-visible {
+      outline: 2px solid var(--main-300);
+      outline-offset: -2px;
+    }
+  }
+
+  .header-filter-panel {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    min-width: 140px;
+
+    .header-filter-options {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+
+      :deep(.ant-checkbox-wrapper) {
+        font-size: 13px;
+        color: var(--gray-700);
+      }
+    }
+
+    .header-filter-empty {
+      color: var(--gray-500);
+      font-size: 12px;
+      padding: 4px 0;
+    }
+
+    .header-filter-clear {
+      align-self: flex-end;
+      padding: 0;
+      border: 0;
+      background: transparent;
+      color: var(--main-color);
+      font-size: 12px;
+      cursor: pointer;
+
+      &:disabled {
+        color: var(--gray-400);
+        cursor: not-allowed;
+      }
+
+      &:focus-visible {
+        outline: 2px solid var(--main-300);
+        outline-offset: 2px;
+      }
     }
   }
 

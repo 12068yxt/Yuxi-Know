@@ -45,12 +45,21 @@ def test_workspace_read_write_edit_and_search_do_not_wake_vm(backend):
     assert backend.read("/home/user/workspace/project/a.txt").file_data["content"].startswith("first")
 
 
-def test_workspace_write_cannot_overwrite_existing_file(backend):
-    """新建工具不覆盖文件。"""
+def test_workspace_write_overwrites_existing_file_without_following_links(backend):
+    """write_file 按工具契约整体覆盖已存在文件，且不穿过最终组件链接写目标。"""
     path = f"{WORKSPACE_PATH}/exists.txt"
     assert backend.write(path, "original").error is None
-    assert backend.write(path, "replacement").error
-    assert (user_workspace_dir("one") / "exists.txt").read_text() == "original"
+    assert backend.write(path, "replacement").error is None
+    assert (user_workspace_dir("one") / "exists.txt").read_text() == "replacement"
+    # 最终组件是链接时只替换链接本身，不访问链接目标字节。
+    root = user_workspace_dir("one")
+    (root / "target.txt").write_text("keep-me")
+    (root / "alias.txt").symlink_to("target.txt")
+    alias = f"{WORKSPACE_PATH}/alias.txt"
+    assert backend.write(alias, "rewritten").error is None
+    assert (root / "target.txt").read_text() == "keep-me"
+    assert (root / "alias.txt").is_symlink() is False
+    assert (root / "alias.txt").read_text() == "rewritten"
 
 
 def test_symlink_cannot_escape_to_other_user_and_never_falls_back(backend):

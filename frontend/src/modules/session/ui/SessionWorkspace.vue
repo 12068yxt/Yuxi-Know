@@ -131,6 +131,7 @@
                       :widget-action="handleWidgetAction"
                       :widgets-disabled="row.group.status === 'streaming' || widgetActionsDisabled"
                       @retry="retryMessage(displayItem.message)"
+                      @open-refs="openTurnSourcesPanel"
                     >
                     </AgentMessageComponent>
                     <ToolCallsGroupComponent
@@ -178,6 +179,7 @@
                     :show-refs="['model', 'copy', 'sources']"
                     :is-latest-message="false"
                     :sources="getMessageGroupSources(row.group)"
+                    @open-refs="openTurnSourcesPanel"
                   />
                 </div>
                 <div v-else class="chat-inline-notice">
@@ -785,6 +787,7 @@ import { createThreadForContext } from '@/modules/session/model/threadCreation'
 import {
   FILE_TREE_SECTION,
   MESSAGE_DEBUG_SECTION,
+  TURN_SOURCES_SECTION,
   closeAgentPanelSection as closePanelSectionState,
   shouldPollAgentPanelFilesystem,
   upsertAgentPanelSection
@@ -1447,6 +1450,31 @@ const toggleMessageDebugPanel = () => {
     MESSAGE_DEBUG_SECTION
   )
   agentPanelActiveSectionKey.value = MESSAGE_DEBUG_SECTION.key
+  isFilePanelOpen.value = true
+  statePanelOpen.value = false
+}
+
+/** 消息内"来源"改为在右侧栏展开；再次点击同一 Turn 的入口时收起面板。 */
+const openTurnSourcesPanel = (payload) => {
+  const turnId = payload?.turnId || ''
+  if (
+    isFilePanelOpen.value &&
+    agentPanelActiveSectionKey.value === TURN_SOURCES_SECTION.key &&
+    agentPanelSections.value.find((section) => section.key === TURN_SOURCES_SECTION.key)
+      ?.turnId === turnId
+  ) {
+    closeFilePanel()
+    return
+  }
+  agentPanelSections.value = upsertAgentPanelSection(agentPanelSections.value, {
+    ...TURN_SOURCES_SECTION,
+    turnId,
+    sources: {
+      knowledgeChunks: Array.isArray(payload?.knowledgeChunks) ? payload.knowledgeChunks : [],
+      webSources: Array.isArray(payload?.webSources) ? payload.webSources : []
+    }
+  })
+  agentPanelActiveSectionKey.value = TURN_SOURCES_SECTION.key
   isFilePanelOpen.value = true
   statePanelOpen.value = false
 }
