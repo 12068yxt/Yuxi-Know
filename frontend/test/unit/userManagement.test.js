@@ -116,3 +116,42 @@ test('表头筛选支持角色与部门多选，未选值不下发筛选参数',
     unmount()
   }
 })
+
+test('部门筛选选项只保留有用户的部门，无人部门不进入候选', async () => {
+  const source = await fs.readFile(
+    new URL('../../src/modules/settings/ui/UserManagementComponent.vue', import.meta.url), 'utf8'
+  )
+  const { descriptor } = parse(source)
+  const executable = compileScript(descriptor, { id: 'user-management-dept-options' }).content
+    .replace(/^import[\s\S]*?from '[^']+'\n/gm, '').replace('export default', 'return')
+  const deps = {
+    reactive, computed, ref,
+    watch: () => {},
+    onMounted() {}, onUnmounted() {},
+    useUserStore: () => ({ isSuperAdmin: true, userId: 1 }),
+    authApi: { getUsersPage: async () => ({ items: [], total: 0 }) },
+    departmentApi: {}, message: {}, Modal: {},
+    formatDateTime: (value) => value,
+    isPasswordLongEnough: () => true, MIN_PASSWORD_LENGTH: 8,
+    FallbackAvatar: {},
+    ...Object.fromEntries(['Plus', 'SquarePen', 'Trash2', 'User', 'UserLock', 'UserStar', 'RefreshCw', 'Search', 'ListFilter'].map((name) => [name, {}]))
+  }
+  const component = new Function(...Object.keys(deps), executable)(...Object.values(deps))
+  const page = component.setup({}, { expose() {} })
+  try {
+    page.departmentManagement.departments = [
+      { id: 1, name: '研发部', user_count: 5 },
+      { id: 2, name: '空部门', user_count: 0 },
+      { id: 3, name: '产品部', user_count: 2 }
+    ]
+    // 当前页用户兜底：部门列表缺失时按用户所在部门补齐。
+    page.userManagement.users = [
+      { id: 9, department_id: 3, department_name: '产品部' },
+      { id: 10, department_id: null, department_name: '' }
+    ]
+    const labels = page.departmentFilterOptions.value.map((option) => option.label)
+    assert.deepEqual(labels, ['研发部', '产品部'])
+  } finally {
+    page.userManagement.users = []
+  }
+})

@@ -68,7 +68,7 @@
                     <span>角色</span>
                     <a-popover trigger="click" placement="bottomRight">
                       <template #content>
-                        <div class="header-filter-panel">
+                        <div class="yuxi-header-filter-panel">
                           <a-checkbox-group
                             v-model:value="userManagement.roleFilterValues"
                             class="header-filter-options"
@@ -98,15 +98,33 @@
                 <template v-else-if="column.key === 'department' && showHeaderFilter">
                   <div class="header-filter-cell">
                     <span>所属部门/实例</span>
-                    <a-popover trigger="click" placement="bottomRight">
+                    <a-popover
+                      trigger="click"
+                      placement="bottomRight"
+                      @open-change="(open) => open && (departmentFilterKeyword = '')"
+                    >
                       <template #content>
-                        <div class="header-filter-panel">
+                        <div class="yuxi-header-filter-panel">
                           <template v-if="departmentFilterOptions.length">
+                            <a-input
+                              v-if="departmentFilterOptions.length > 8"
+                              v-model:value="departmentFilterKeyword"
+                              class="yuxi-header-filter-search"
+                              size="small"
+                              placeholder="搜索部门"
+                              allow-clear
+                            />
                             <a-checkbox-group
                               v-model:value="userManagement.departmentFilterValues"
                               class="header-filter-options"
-                              :options="departmentFilterOptions"
+                              :options="visibleDepartmentOptions"
                             />
+                            <div
+                              v-if="departmentFilterOptions.length && !visibleDepartmentOptions.length"
+                              class="header-filter-empty"
+                            >
+                              没有匹配的部门
+                            </div>
                           </template>
                           <div v-else class="header-filter-empty">暂无可筛选的部门</div>
                           <button
@@ -412,6 +430,14 @@ watch(showHeaderFilter, (visible) => {
   userManagement.roleFilterValues = []
 })
 
+// 部门候选可能很多，弹层内按关键词本地过滤，选择仍然即时生效。
+const departmentFilterKeyword = ref('')
+const visibleDepartmentOptions = computed(() => {
+  const keyword = departmentFilterKeyword.value.trim().toLowerCase()
+  if (!keyword) return departmentFilterOptions.value
+  return departmentFilterOptions.value.filter((option) => option.label.toLowerCase().includes(keyword))
+})
+
 const roleFilterOptions = [
   { label: '超级管理员', value: 'superadmin' },
   { label: '管理员', value: 'admin' },
@@ -421,7 +447,9 @@ const roleFilterOptions = [
 const departmentFilterOptions = computed(() => {
   const options = new Map()
 
+  // 只提供还有用户的部门：无人的部门进入筛选只会制造噪音。
   departmentManagement.departments.forEach((dept) => {
+    if (!(dept.user_count > 0)) return
     options.set(String(dept.id), {
       value: String(dept.id),
       label: dept.name
@@ -989,50 +1017,6 @@ onUnmounted(() => {
     }
   }
 
-  .header-filter-panel {
-    display: flex;
-    flex-direction: column;
-    gap: 8px;
-    min-width: 140px;
-
-    .header-filter-options {
-      display: flex;
-      flex-direction: column;
-      gap: 6px;
-
-      :deep(.ant-checkbox-wrapper) {
-        font-size: 13px;
-        color: var(--gray-700);
-      }
-    }
-
-    .header-filter-empty {
-      color: var(--gray-500);
-      font-size: 12px;
-      padding: 4px 0;
-    }
-
-    .header-filter-clear {
-      align-self: flex-end;
-      padding: 0;
-      border: 0;
-      background: transparent;
-      color: var(--main-color);
-      font-size: 12px;
-      cursor: pointer;
-
-      &:disabled {
-        color: var(--gray-400);
-        cursor: not-allowed;
-      }
-
-      &:focus-visible {
-        outline: 2px solid var(--main-300);
-        outline-offset: 2px;
-      }
-    }
-  }
-
   .dept-text,
   .time-text {
     color: var(--gray-600);
@@ -1073,6 +1057,77 @@ onUnmounted(() => {
         color: var(--gray-700);
         font-size: 13px;
       }
+    }
+  }
+}
+</style>
+
+<style lang="less">
+// 表头筛选弹层由 a-popover 挂载到 body，脱离组件 scoped 祖先链，样式需要全局提供。
+.yuxi-header-filter-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 160px;
+
+  .header-filter-options {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    max-height: 264px;
+    overflow-y: auto;
+    scrollbar-width: thin;
+
+    .ant-checkbox-wrapper {
+      margin-inline-start: 0;
+      padding: 3px 4px;
+      border-radius: 6px;
+      font-size: 13px;
+      color: var(--gray-700);
+      white-space: nowrap;
+
+      &:hover {
+        background: var(--gray-50);
+      }
+
+      .ant-checkbox + span {
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+    }
+  }
+
+  .yuxi-header-filter-search {
+    flex-shrink: 0;
+  }
+
+  .header-filter-empty {
+    padding: 4px 0;
+    color: var(--gray-500);
+    font-size: 12px;
+  }
+
+  .header-filter-clear {
+    align-self: flex-end;
+    padding: 0;
+    border: 0;
+    background: transparent;
+    color: var(--main-color);
+    font-size: 12px;
+    cursor: pointer;
+
+    &:hover {
+      color: var(--main-600);
+    }
+
+    &:disabled {
+      color: var(--gray-400);
+      cursor: not-allowed;
+    }
+
+    &:focus-visible {
+      outline: 2px solid var(--main-300);
+      outline-offset: 2px;
     }
   }
 }
