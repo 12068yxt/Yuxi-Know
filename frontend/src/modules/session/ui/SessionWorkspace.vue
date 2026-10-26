@@ -270,7 +270,7 @@
                         <button
                           v-if="canPromoteQueuedInput(input)"
                           type="button"
-                          class="queued-request-delete lucide-icon-btn"
+                          class="queued-request-promote lucide-icon-btn"
                           :disabled="
                             promotingInputIds.has(input.input_id) ||
                             cancellingInputIds.has(input.input_id)
@@ -281,7 +281,7 @@
                           aria-label="转为引导"
                           @click="handlePromoteQueuedInput(input.input_id)"
                         >
-                          <CornerDownRight :size="16" />
+                          <ArrowUpFromLine :size="16" />
                         </button>
                         <button
                           v-if="canCancelQueuedInput(input)"
@@ -706,6 +706,7 @@ import {
 } from 'vue'
 import { message } from 'ant-design-vue'
 import {
+  ArrowUpFromLine,
   Bug,
   ChevronDown,
   CornerDownRight,
@@ -3793,6 +3794,38 @@ watch(currentChatId, (threadId, oldThreadId) => {
       &:hover:not(:disabled) {
         color: var(--color-error-700);
         background: var(--color-error-50);
+      }
+
+      &:focus-visible {
+        outline: 2px solid var(--main-color);
+        outline-offset: 1px;
+      }
+
+      &:disabled {
+        color: var(--gray-300);
+        cursor: wait;
+      }
+    }
+
+    .queued-request-promote {
+      width: 30px;
+      height: 30px;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      padding: 0;
+      color: var(--gray-500);
+      background: transparent;
+      border: 0;
+      border-radius: 6px;
+      cursor: pointer;
+      transition:
+        color 0.18s ease,
+        background-color 0.18s ease;
+
+      &:hover:not(:disabled) {
+        color: var(--color-success-700);
+        background: var(--color-success-50);
       }
 
       &:focus-visible {
